@@ -84,24 +84,94 @@ def fallback_ids() -> list:
     return [e["id"] for e in reg][:3]
 
 
+def provider_key(provider: dict) -> str:
+    """取 provider 需要的 Key：优先它的 key_env（含用户级环境变量兜底），其次 config.json 老字段。"""
+    import os
+    env = str((provider or {}).get("key_env") or "").strip()
+    if env:
+        v = (os.environ.get(env) or "").strip()
+        if not v:
+            try:
+                from Tools.ai_backend import _user_env
+                v = _user_env(env)
+            except Exception:
+                v = ""
+        if v:
+            return v
+    try:
+        from Hyper import Configurator
+        o = Configurator.cm.get_cfg().others or {}
+        for k in ("gemini_key", "deepseek_key", "openai_key"):
+            v = str(o.get(k) or "").strip()
+            if v:
+                return v
+    except Exception:
+        pass
+    return ""
+
+
+def is_usable(model_id) -> tuple[bool, str]:
+    """这个模型现在能不能用：provider 存在，且**需要 Key 时确实拿得到 Key**。
+
+    加它的原因（本次线上故障）：注册表允许把用户/群/全局设成任意条目，但
+    "选了 gemini-flash 却没配 GEMINI_API_KEY、也连不上 Google"这种情况以前完全静默 ——
+    请求失败 → AI 返回空 → 机器人发出一条**空文字**消息，用户只看到一个没有正文的引用块。
+    这里先判可用性，不可用就按 fallback_chain 降级。
+    """
+    e = find(model_id)
+    if not e:
+        return False, f"模型 {model_id!r} 不在注册表里"
+    p = providers().get(str(e.get("provider") or ""))
+    if not isinstance(p, dict):
+        return False, f"provider {e.get('provider')!r} 未定义"
+    base = str(p.get("base_url") or "")
+    ptype = str(p.get("type") or "").lower()
+    local_like = ptype == "local" or any(h in base for h in ("127.0.0.1", "localhost"))
+    if local_like:
+        return True, "本地（无需 Key）"
+    key_env = str(p.get("key_env") or "").strip()
+    if not key_env:
+        return True, "provider 未声明 Key"
+    if provider_key(p):
+        return True, "OK"
+    return False, f"缺少 Key：环境变量 {key_env} 未设置，config.json 也没填"
+
+
+def first_usable(preferred: list) -> str:
+    """按顺序挑第一个可用的模型；全都不行就返回第一个（交给调用方去撞，并留下日志）。"""
+    for mid in preferred:
+        ok, why = is_usable(mid)
+        if ok:
+            return mid
+        print(f"[模型] 跳过不可用模型 {mid}：{why}")
+    return preferred[0] if preferred else ""
+
+
 # --------------------------------------------------------------------------
 # 三级作用域：用户 > 群 > 全局
 # --------------------------------------------------------------------------
 def scoped_model_id(qq=None, group_id=None) -> str:
-    """就近解析：用户偏好 > 群偏好 > 全局默认。"""
+    """就近解析：用户偏好 > 群偏好 > 全局默认；选中的模型不可用时按 fallback_chain 降级。"""
+    chosen = ""
     try:
         from Tools import userstore
         if qq is not None:
             v = userstore.pref_get(qq, "model")
             if v and find(v):
-                return find(v)["id"]
-        if group_id is not None:
+                chosen = find(v)["id"]
+        if not chosen and group_id is not None:
             v = userstore.group_pref_get(group_id, "model")
             if v and find(v):
-                return find(v)["id"]
+                chosen = find(v)["id"]
     except Exception as e:
         print(f"[模型] 作用域解析失败，回落全局默认：{e}")
-    return default_id()
+    if not chosen:
+        chosen = default_id()
+    ok, why = is_usable(chosen)
+    if ok:
+        return chosen
+    print(f"[模型] 选中的 {chosen} 当前不可用（{why}），按 fallback_chain 降级")
+    return first_usable(fallback_ids()) or chosen
 
 
 def set_user_model(qq, key: str) -> tuple[bool, str]:

@@ -92,6 +92,31 @@ def resolve(default_mode: str = "deepseek-chat") -> tuple[str, str, dict, bool]:
     return "", model, extra, True
 
 
+def _user_env(name: str) -> str:
+    """读 Windows 用户级环境变量（HKCU\\Environment）作为兜底。
+
+    为什么需要：Key 已改为放环境变量（见 安装与配置说明.md §4.1），但环境变量只对**之后新开的**
+    进程生效 —— 如果机器人是从环境块较旧的父进程（旧的 cmd 窗口 / 托盘）拉起来的，就读不到 Key，
+    表现成"明明设过了却提示未配置"。注册表里的值是持久化的，这里作为最后一道兜底。
+    """
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as _k:
+            _v, _ = winreg.QueryValueEx(_k, name)
+            return str(_v or "").strip()
+    except Exception:
+        return ""
+
+
+def _env_key(names) -> tuple[str, str]:
+    """按顺序取第一个非空的环境变量，先看进程环境、再看用户级注册表。返回 (值, 变量名)。"""
+    for _n in names:
+        _v = (os.environ.get(_n) or "").strip() or _user_env(_n)
+        if _v:
+            return _v, _n
+    return "", ""
+
+
 def get_api_key(base_url: str | None = None) -> str:
     """取 API Key。优先级：provider 专属环境变量 > 通用环境变量 > config.json > 占位值。
 
@@ -108,23 +133,25 @@ def get_api_key(base_url: str | None = None) -> str:
             for _pk, _p in model_registry.providers().items():
                 if str(_p.get("base_url") or "").strip() == str(base_url).strip():
                     _env = str(_p.get("key_env") or "").strip()
-                    if _env and (os.environ.get(_env) or "").strip():
-                        return os.environ[_env].strip()
+                    if _env:
+                        _pv = (os.environ.get(_env) or "").strip() or _user_env(_env)
+                        if _pv:
+                            return _pv
         except Exception:
             pass
-    for _env_name in ("JIANER_API_KEY", "DEEPSEEK_API_KEY"):
-        _v = (os.environ.get(_env_name) or "").strip()
-        if _v:
-            return _v
+    _v, _ = _env_key(("JIANER_API_KEY", "DEEPSEEK_API_KEY"))
+    if _v:
+        return _v
     key = str(_others().get("deepseek_key") or "").strip()
     return key or "lm-studio"
 
 
 def api_key_source() -> str:
     """说明当前 Key 来自哪里，供 ~后端状态 / 自检打印，避免"以为填了其实没生效"。"""
-    for _env_name in ("JIANER_API_KEY", "DEEPSEEK_API_KEY"):
-        if (os.environ.get(_env_name) or "").strip():
-            return f"环境变量 {_env_name}"
+    for _n in ("JIANER_API_KEY", "DEEPSEEK_API_KEY"):
+        _v = (os.environ.get(_n) or "").strip() or _user_env(_n)
+        if _v:
+            return f"环境变量 {_n}"
     if str(_others().get("deepseek_key") or "").strip():
         return "config.json 的 deepseek_key"
     return "默认占位值（未配置）"

@@ -135,7 +135,13 @@ class AIKernal:
         await self.finalize_messages()
 
         if not self.sended:
-            await self.send_message([Segments.Text(self.result)], True)
+            # 修复：模型不可用 / 返回为空时，原来会发一条**空文字**消息 —— 在 QQ 里表现为
+            # "只有一个引用块、没有正文"，用户完全看不懂（线上就是这么报障的：只看到被引用的话）。
+            # 这里换成一句能看懂、能照做的提示。（语音模式 emit_text=False 时 send_message 本就不发文字）
+            _fallback = self.result or (
+                f"（这次我没能生成回复：当前模型可能不可用、或没有返回任何内容。"
+                f"发 {self.reminder}模型 可以看看有哪些模型，换一个再试）")
+            await self.send_message([Segments.Text(_fallback)], True)
 
         return cmc, self.user_lists, self.result
 
