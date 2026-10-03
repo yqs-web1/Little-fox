@@ -222,14 +222,8 @@ class AIKernal:
             return False
         if getattr(self.event, "message_id", None) is None:
             return False           # 拿不到原消息 ID 就没法引用，安全跳过
-        # 只在"用户自己引用了某条消息"时才回引用：
-        # 每条回复都挂引用时，一旦正文为空就只剩一个引用块（看起来像复读），既吵又容易显示异常。
-        try:
-            from Tools.reply import user_quoted
-            if not user_quoted(self.event):
-                return False
-        except Exception:
-            return False
+        # 策略：私聊**纯文字回复总是带引用**（本类只发文字段）；
+        # 语音/图片等各自走别的发送路径，由 main.py 显式 reply_to=None 控制（不引用）。
         if self.quote_only_first:
             # self.sended 由 handle_message_stream 维护：发出首条之前恒为 False
             return not self.sended

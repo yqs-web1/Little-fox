@@ -81,11 +81,10 @@ async def reply_send(actions, Manager, Segments, event, message, quote=None):
     if quote is None:
         quote = _flag("private_reply_quote", True) if gid is None else False
     if quote and gid is None:
-        # 需求：私聊**只有纯文字回复**才带引用 ——
-        #   * 用户必须自己先引用了某条消息（否则不回引用，见 user_quoted 的说明）；
-        #   * 且这条回复必须全是文字段：语音/图片/文件/转发等一律不挂引用
-        #     （实测"语音 + 引用"在 QQ 上引用块显示不正常）。
-        if not user_quoted(event) or not all(isinstance(_s, Segments.Text) for _s in segs):
+        # 需求：私聊**纯文字回复总是带引用**（不要求用户先引用）；
+        # 语音 / 图片 / 文件 / 转发等一律不引用（实测"语音 + 引用"在 QQ 上引用块显示不正常）。
+        # 想收紧成"只在用户引用了消息时才引用"，把 user_quoted(event) 加回条件里即可。
+        if not all(isinstance(_s, Segments.Text) for _s in segs):
             quote = False
 
     try:
@@ -102,15 +101,14 @@ async def reply_send(actions, Manager, Segments, event, message, quote=None):
 
 
 def quote_target(event):
-    """私聊且"用户引用了消息"时返回要引用的 message_id，否则 None。
+    """私聊时返回要引用的 message_id（不引用则 None）。
 
-    给 speak_and_send(reply_to=...) 这类不走 reply_send 的发送路径用，
-    保证"语音回复"也遵守同一条约定（但语音目前不挂引用，见 main.py 里的说明）。
+    给 speak_and_send(reply_to=...) 这类不走 reply_send 的发送路径用。
+    注意：语音路径在 main.py 里显式传 reply_to=None（不引用），所以这个函数目前只是备用；
+    若以后想让语音也带引用，把 reply_to 改回 quote_target(event) 即可。
     """
     if getattr(event, "group_id", None) is not None:
         return None
     if not _flag("private_reply_quote", True):
-        return None
-    if not user_quoted(event):
         return None
     return getattr(event, "message_id", None)

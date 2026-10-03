@@ -78,7 +78,7 @@ os.chdir(os.path.dirname(os.path.abspath(sys.argv[0])))
 from Hyper import Configurator
 Configurator.cm = Configurator.ConfigManager(Configurator.Config(file="config.json").load_from_file())
 from Tools import ai_backend  # 本地/云端 AI 后端解析（必须在 Configurator.cm 初始化之后导入）
-from Tools.reply import reply_send, quote_target  # 统一回复出口：私聊自动带引用
+from Tools.reply import reply_send  # 统一回复出口：私聊纯文字回复自动带引用
 from Tools import presence  # 私聊「正在输入」气泡（NapCat set_input_status）
 from Tools import bubble  # 私聊「正在思考」占位气泡（延迟出现 + 回复前撤回）
 from Hyper import Listener, Events, Logger, Manager, Segments
