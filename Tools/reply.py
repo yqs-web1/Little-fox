@@ -25,6 +25,23 @@ def _flag(name: str, default: bool = True) -> bool:
         return default
 
 
+def user_quoted(event) -> bool:
+    """用户这条消息本身是不是"引用了某条消息"发出来的（长按 → 引用）。
+
+    用途：私聊默认不再给每条回复都挂引用 —— 只在"用户先引用了消息"时才回引用。
+    原因（线上实测）：每条回复都挂引用时，一旦回复正文为空（模型没返回内容），
+    QQ 里就只剩一个引用块，看起来像机器人在复读；而"语音 + 引用"的组合显示也不正常。
+    """
+    try:
+        from Hyper import Segments as _S
+        for _i in (getattr(event, "message", None) or []):
+            if isinstance(_i, _S.Reply):
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def _segments(Segments, message):
     """把 str / 单个 Segment / Segment 列表 统一成列表。"""
     if message is None:
@@ -59,6 +76,9 @@ async def reply_send(actions, Manager, Segments, event, message, quote=None):
     gid = getattr(event, "group_id", None)
     if quote is None:
         quote = _flag("private_reply_quote", True) if gid is None else False
+    # 私聊只在"用户自己引用了某条消息"时才回引用（默认行为收紧，见 user_quoted 的说明）
+    if quote and gid is None and not user_quoted(event):
+        quote = False
 
     try:
         if gid is not None:
@@ -74,13 +94,15 @@ async def reply_send(actions, Manager, Segments, event, message, quote=None):
 
 
 def quote_target(event):
-    """私聊且开启引用时返回要引用的 message_id，否则 None。
+    """私聊且"用户引用了消息"时返回要引用的 message_id，否则 None。
 
     给 speak_and_send(reply_to=...) 这类不走 reply_send 的发送路径用，
-    保证「语音回复」也遵守同一条引用约定。
+    保证"语音回复"也遵守同一条约定（但语音目前不挂引用，见 main.py 里的说明）。
     """
     if getattr(event, "group_id", None) is not None:
         return None
     if not _flag("private_reply_quote", True):
+        return None
+    if not user_quoted(event):
         return None
     return getattr(event, "message_id", None)

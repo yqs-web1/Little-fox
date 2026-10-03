@@ -1049,9 +1049,11 @@ async def handler(event: Events.Event, actions: Listener.Actions) -> None:
                         await reply_send(actions, Manager, Segments, event,
                             "这句话里没有可以朗读的文字哦（只有表情/符号/图片）～换句话再试试？")
                     else:
+                        # 语音不挂引用：QQ 里"语音 + 引用"这个组合显示不正常（实测引用块显示不对），
+                        # 文字回复仍会在"用户自己引用了消息"时带引用。
                         _ok = await speak_and_send(actions, Manager, Segments, event, _speak,
                                                    voice=_voice or voice_sel_for(event), rate=_rate,
-                                                   reply_to=quote_target(event))
+                                                   reply_to=None)
                         if not _ok:
                             await reply_send(actions, Manager, Segments, event,
                                 "语音合成失败：请确认本机已联网（微软神经语音需联网），或已装离线兜底 pyttsx3（venv 执行 pip install pyttsx3 pywin32）。")
@@ -1085,8 +1087,9 @@ async def handler(event: Events.Event, actions: Listener.Actions) -> None:
             _speak = speakable_text(result)
             _ok = False
             if _speak:
+                # 语音不挂引用（QQ 上"语音+引用"显示不正常）；文字兜底那条会按策略带引用。
                 _ok = await speak_and_send(actions, Manager, Segments, event, _speak,
-                                           voice=voice_sel_for(event), reply_to=quote_target(event))
+                                           voice=voice_sel_for(event), reply_to=None)
             if not _ok:
                 # 兜底：能读就用净化后的文本；净化后为空（纯表情）就发原文；连原文都空才用占位符
                 await reply_send(actions, Manager, Segments, event, _speak or (result or "").strip() or "……")
