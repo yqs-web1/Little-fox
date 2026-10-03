@@ -34,7 +34,9 @@ def write_presets(data):
     """写入 JSON 预设数据."""
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4)
+        # 修复：原来没带 ensure_ascii=False，用过一次 ~添加预设 之后，
+        # current.json 里的中文预设名/简介会全部变成 \uXXXX 转义，人眼几乎读不了。
+        json.dump(data, f, indent=4, ensure_ascii=False)
 
 def gen_presets(uid, bot_name, bot_name_en, event_user):
     # 初始化统一预设读写变量 prerequisite_editor 和 prerequisite_readerq
@@ -56,6 +58,7 @@ def gen_presets(uid, bot_name, bot_name_en, event_user):
 
     # 读取属于当前用户的预设
     sys_prompt = None
+    _matched_presets = []
     for preset_id, preset_data in presets.items():
         presets_uid_list = preset_data.get("uid", [])
         if uid in presets_uid_list:
@@ -65,6 +68,12 @@ def gen_presets(uid, bot_name, bot_name_en, event_user):
                 current_preset = preset_data["name"]
                 
                 print(f"[{datetime.datetime.now()}] '{current_preset}' 已载入系统预设")
+            _matched_presets.append(preset_data["name"])
+
+    if len(_matched_presets) > 1:
+        # 一个用户被登记在多个预设里时，按遍历顺序"最后一个"生效，行为不确定 —— 明确告警，
+        # 方便管理员用 ~角色扮演 重新指定，或清理 current.json 里的 uid。
+        print(f"[预设] 警告：用户 {uid} 同时命中 {len(_matched_presets)} 个预设 {_matched_presets}，当前生效的是「{current_preset}」")
     
     if sys_prompt == None:
         preset_path = os.path.join(PRESET_DIR, presets[NORMAL_PRESET]["path"])

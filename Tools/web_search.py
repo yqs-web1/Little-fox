@@ -117,13 +117,27 @@ from Tools.AI_tools import StreamSplitter
 from Tools import ai_backend
 from Hyper import Configurator
 
-SEARCH_SYSTEM = """你是小狐狸，一个可爱、简洁的QQ机器人。下面提供了针对用户问题的网络搜索结果（可能为空）。
+_SEARCH_SYSTEM_TMPL = """你是{bot_name}，一个可爱、简洁的QQ机器人。下面提供了针对用户问题的网络搜索结果（可能为空）。
 请严格遵循：
 1. 用简体中文、自然口语化地回答；
 2. 优先使用搜索结果中的事实，并在回答中自然地标注来源（如“（来源：xxx）”或“据搜索结果显示”）；
 3. 若搜索结果不足以回答，请诚实说明“网上暂时没有特别明确的信息”，并用你的知识补充，但要清楚区分“来自网络搜索”和“我的推测”；
 4. 严禁编造不存在的来源链接或数据；
 5. 回答简洁，适合QQ聊天（约200字以内）。"""
+
+
+def search_system_prompt() -> str:
+    """联网模式的系统提示。
+
+    修复：原来这里把"你是小狐狸"硬编码在常量里，改了 config.json 的 bot_name
+    联网模式的人格也不会跟着变。现在每次调用都从 config.json 现取。
+    """
+    try:
+        others = Configurator.cm.get_cfg().others or {}
+        name = str(others.get("bot_name") or "").strip()
+    except Exception:
+        name = ""
+    return _SEARCH_SYSTEM_TMPL.format(bot_name=name or "小狐狸")
 
 
 class websearch_gemma:
@@ -158,7 +172,7 @@ class websearch_gemma:
             query = (self.message or "").strip()
             user_lists = self.user_lists
             uid = str(self.uid)
-            system_message = {"role": "system", "content": SEARCH_SYSTEM}
+            system_message = {"role": "system", "content": search_system_prompt()}
 
             if uid not in user_lists:
                 user_lists[uid] = [system_message]

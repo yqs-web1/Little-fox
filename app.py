@@ -13,6 +13,7 @@ import signal
 import zipfile
 import re
 import shlex
+import secrets
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from flask import Flask, request, jsonify, Response, send_from_directory
@@ -51,7 +52,9 @@ except ImportError as e:
     print(f"Warning: Could not import some modules: {e}")
 
 app = Flask(__name__, static_folder='dist')
-CORS(app)
+# 安全修复（2026-10-04）：原来 CORS(app) 放开任意来源，任何网页都能跨域读写向导接口。
+# 向导前端由本应用同源提供，本身不需要跨域，这里只放开本机来源。
+CORS(app, resources={r"/api/*": {"origins": ["http://127.0.0.1:5000", "http://localhost:5000"]}})
 sock = Sock(app) if Sock is not None else None
 
 # Global state
@@ -151,6 +154,91 @@ def ensure_config_files():
 # Ensure core config exists during app startup.
 ensure_config_files()
 
+# ==================== 本机访问鉴权（2026-10-04 新增）====================
+# 原来所有接口零鉴权（外加监听 0.0.0.0），局域网内任何人都能读写配置、执行命令。
+# 现在 /api/* 一律要求 token。为了不改动已构建好的前端（dist/ 是预编译产物，改不了），
+# token 用「首次带 ?token=... 访问 → 服务端种一个 HttpOnly Cookie → 之后免 token」的方式下发。
+# token 优先取环境变量 JIANER_WEBUI_TOKEN，否则复用（或首次生成并写入）webui.json 的 webui_token。
+COOKIE_NAME = 'jianer_webui_token'
+
+
+def _load_or_create_webui_token():
+    env_tok = (os.environ.get('JIANER_WEBUI_TOKEN') or '').strip()
+    if env_tok:
+        return env_tok, '环境变量 JIANER_WEBUI_TOKEN'
+    cfg = load_json(WEBUI_CONFIG_PATH, {})
+    tok = str(cfg.get('webui_token') or '').strip()
+    if tok:
+        return tok, 'webui.json 的 webui_token'
+    tok = secrets.token_urlsafe(24)
+    cfg['webui_token'] = tok
+    save_json(WEBUI_CONFIG_PATH, cfg)
+    return tok, '本次自动生成并写入 webui.json'
+
+
+WEBUI_TOKEN, WEBUI_TOKEN_SOURCE = _load_or_create_webui_token()
+
+
+def _webui_token_ok():
+    if not WEBUI_TOKEN:
+        return True
+    cands = [request.headers.get('X-Auth-Token'), request.args.get('token'), request.cookies.get(COOKIE_NAME)]
+    for c in cands:
+        if c and secrets.compare_digest(str(c), WEBUI_TOKEN):
+            return True
+    return False
+
+
+def _safe_child_path(base_dir: str, name):
+    """把 name 安全地拼到 base_dir 之下；非法或越界返回 None。
+
+    只接受单层文件名/目录名（不含 / \\ .. 与盘符），最后再用 commonpath 兜一次底。
+    用来堵住 /api/presets/<id>、/api/plugins/remove 这类接口的任意文件读写/删除。
+    """
+    if name is None:
+        return None
+    raw = str(name).strip()
+    if not raw or raw in ('.', '..'):
+        return None
+    if os.path.isabs(raw) or os.path.splitdrive(raw)[0]:
+        return None
+    if '/' in raw or '\\' in raw:
+        return None
+    # URL 编码残留（如 ..%2f..%2f）与"全是点"的名字都不是正常文件名，直接拒绝，
+    # 否则会在目标目录里造出 ..%2f..%2fmain.txt / ...txt 这类垃圾文件。
+    if '%' in raw or set(raw) <= {'.'}:
+        return None
+    base = os.path.abspath(base_dir)
+    full = os.path.abspath(os.path.join(base, raw))
+    try:
+        if os.path.commonpath([base, full]) != base:
+            return None
+    except ValueError:
+        return None
+    return full
+
+
+@app.before_request
+def _webui_auth_guard():
+    # 前端页面与静态资源不拦（本身不含敏感数据）；所有 /api/* 必须带 token
+    if not (request.path or '').startswith('/api/'):
+        return None
+    if _webui_token_ok():
+        return None
+    return jsonify({'ok': False, 'error': {
+        'type': 'unauthorized',
+        'message': '未授权：请打开控制台打印的 http://127.0.0.1:5000/?token=... 地址，'
+                   '或用请求头 X-Auth-Token 携带 token。'}}), 401
+
+
+@app.after_request
+def _webui_issue_cookie(resp):
+    tok = request.args.get('token')
+    if tok and WEBUI_TOKEN and secrets.compare_digest(str(tok), WEBUI_TOKEN):
+        resp.set_cookie(COOKIE_NAME, WEBUI_TOKEN, httponly=True, samesite='Lax', max_age=60 * 60 * 24 * 30)
+    return resp
+
+
 @app.route('/api/settings', methods=['GET'])
 def get_settings():
     # Ensure files exist before reading
@@ -232,6 +320,10 @@ def save_presets_impl(presets_payload):
             path = str(v.get('path') or f'{k}.txt').strip()
             if not path:
                 path = f'{k}.txt'
+            # 安全：path/预设 ID 必须是 prerequisites/ 下的单层文件名，否则拒收（防任意路径写入）
+            _base = os.path.join(current_dir, 'prerequisites')
+            if _safe_child_path(_base, path) is None or _safe_child_path(_base, f'{k}.txt') is None:
+                raise ValueError(f'非法的预设文件名或预设 ID：path={path!r} id={k!r}')
             normed[k] = {'name': name, 'info': info, 'uid': norm_uid, 'path': path}
 
         presets_tool.write_presets(normed)
@@ -239,8 +331,8 @@ def save_presets_impl(presets_payload):
             base = os.path.join(current_dir, 'prerequisites')
             os.makedirs(base, exist_ok=True)
             for k, v in normed.items():
-                p = os.path.join(base, v['path'])
-                if not os.path.exists(p):
+                p = _safe_child_path(base, v.get('path'))
+                if p and not os.path.exists(p):
                     open(p, 'a', encoding='utf-8').close()
         except Exception:
             pass
@@ -323,6 +415,11 @@ def list_presets_route():
 def get_preset_content_route(id):
     try:
         print(f"Fetching content for preset: {id}")
+        # 安全：id 必须是正常名字（挡住 .. / ..%2f.. 这类）。放在最前面，
+        # 否则"id 不在 current.json"的提前返回会让非法 id 走进 200 分支。
+        if _safe_child_path(os.path.join(current_dir, 'prerequisites'), id) is None:
+            return jsonify({'error': '非法的预设 ID'}), 400
+
         presets = presets_tool.read_presets()
         
         # If ID is not in current.json, it's likely a new preset not yet saved.
@@ -332,7 +429,10 @@ def get_preset_content_route(id):
             return jsonify({'content': '', 'is_new': True})
         
         filename = presets[id].get('path', f'{id}.txt')
-        preset_path = os.path.join(current_dir, 'prerequisites', filename)
+        # 安全：只允许读取 prerequisites/ 下的单层文件（原来 filename 未校验，可读任意文件）
+        preset_path = _safe_child_path(os.path.join(current_dir, 'prerequisites'), filename)
+        if preset_path is None:
+            return jsonify({'error': '非法的预设路径'}), 400
         
         if not os.path.exists(preset_path):
             print(f"File not found: {preset_path}, returning empty content.")
@@ -354,7 +454,12 @@ def save_preset_content_route(id):
         
         if not presets:
             presets = {}
-            
+
+        preset_dir = os.path.join(current_dir, 'prerequisites')
+        # 安全：id 只允许正常名字。原来 id 未校验，传 "../../main" 就能把内容写到项目外的任意文件。
+        if _safe_child_path(preset_dir, id) is None:
+            return jsonify({'ok': False, 'error': {'type': 'bad_request', 'message': '非法的预设 ID'}}), 400
+
         if id not in presets:
             # If not found, create a entry for it
             presets[id] = {
@@ -366,9 +471,11 @@ def save_preset_content_route(id):
             presets_tool.write_presets(presets)
             
         filename = presets[id].get('path', f'{id}.txt')
-        preset_dir = os.path.join(current_dir, 'prerequisites')
         os.makedirs(preset_dir, exist_ok=True)
-        preset_path = os.path.join(preset_dir, filename)
+        # 安全：存储的 path 同样必须落在 prerequisites/ 下
+        preset_path = _safe_child_path(preset_dir, filename)
+        if preset_path is None:
+            return jsonify({'ok': False, 'error': {'type': 'bad_request', 'message': '非法的预设路径'}}), 400
         
         with open(preset_path, 'w', encoding='utf-8') as f:
             f.write(content)
@@ -382,6 +489,10 @@ def delete_preset_route(id):
     try:
         if id == 'Normal':
             return jsonify({'ok': False, 'error': {'type': 'forbidden', 'message': '默认预设不可删除'}}), 403
+
+        # 安全：id 必须是正常名字。放在"id 不存在就直接返回"之前，否则非法 id 会走进 200 分支。
+        if _safe_child_path(os.path.join(current_dir, 'prerequisites'), id) is None:
+            return jsonify({'ok': False, 'error': {'type': 'invalid_path', 'message': '非法的预设 ID'}}), 400
 
         presets = {}
         try:
@@ -398,8 +509,11 @@ def delete_preset_route(id):
 
         base_dir = os.path.abspath(os.path.join(current_dir, 'prerequisites'))
         os.makedirs(base_dir, exist_ok=True)
-        target_path = os.path.abspath(os.path.join(base_dir, filename))
-        if not target_path.startswith(base_dir + os.sep):
+        # 安全：id 与存储的 path 都必须落在 prerequisites/ 下的单层名字（统一走 _safe_child_path）
+        if _safe_child_path(base_dir, id) is None:
+            return jsonify({'ok': False, 'error': {'type': 'invalid_path', 'message': '非法的预设 ID'}}), 400
+        target_path = _safe_child_path(base_dir, filename)
+        if target_path is None:
             return jsonify({'ok': False, 'error': {'type': 'invalid_path', 'message': '预设文件路径非法'}}), 400
 
         presets.pop(id, None)
@@ -816,9 +930,15 @@ if sock is not None:
 
 @app.route('/api/plugins/remove', methods=['POST'])
 def plugin_remove_route():
-    name = request.json.get('name')
+    name = (request.json or {}).get('name')
     plugins_dir = os.path.join(jianer_bot_path, 'plugins')
-    plugin_path = os.path.join(plugins_dir, name)
+    # 安全：只允许删除 plugins/ 下的单层名字。
+    # 原来 name 直接用 os.path.join + shutil.rmtree，传 "../.." 之类就能删掉任意目录。
+    plugin_path = _safe_child_path(plugins_dir, name)
+    if plugin_path is None:
+        return jsonify({'ok': False, 'error': {'type': 'bad_request', 'message': '非法的插件名'}}), 400
+    if plugin_path == os.path.abspath(plugins_dir):
+        return jsonify({'ok': False, 'error': {'type': 'bad_request', 'message': '非法的插件名'}}), 400
     
     import shutil
     try:
@@ -833,8 +953,11 @@ def plugin_remove_route():
 
 @app.route('/api/plugins/toggle', methods=['POST'])
 def plugin_toggle_route():
-    name = request.json.get('name')
+    name = (request.json or {}).get('name')
     plugins_dir = os.path.join(jianer_bot_path, 'plugins')
+    # 安全：同样的越界校验（原名未校验，可对 plugins/ 之外的文件做改名）
+    if _safe_child_path(plugins_dir, name) is None:
+        return jsonify({'ok': False, 'error': {'type': 'bad_request', 'message': '非法的插件名'}}), 400
     
     # Check if it's currently enabled (normal name) or disabled (d_ prefix)
     # This logic depends on how PluginsManager works. 
@@ -2216,4 +2339,11 @@ if __name__ == '__main__':
     # 安全修复：原来监听 0.0.0.0 + debug=True，等于把「零鉴权的配置/命令执行接口 + Werkzeug 调试器」
     # 暴露给整个局域网。本向导只在本机使用，因此绑定回环地址并关闭调试模式。
     # 确实需要别的机器访问时，请自行加反向代理与鉴权，不要把 0.0.0.0 恢复回去。
+    print("=" * 70)
+    print("[向导] 请用下面这个地址访问（首次访问会种下登录 Cookie，之后直接开首页即可）：")
+    print(f"       http://127.0.0.1:5000/?token={WEBUI_TOKEN}")
+    print(f"[向导] token 来源：{WEBUI_TOKEN_SOURCE}")
+    print("[向导] 若直接打开不带 token 的地址：页面能显示，但所有接口会返回 401。")
+    print("[向导] 脚本调用请带请求头：X-Auth-Token: <token>")
+    print("=" * 70)
     app.run(host='127.0.0.1', port=5000, debug=False)

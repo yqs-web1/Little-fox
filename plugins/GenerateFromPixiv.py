@@ -128,7 +128,11 @@ AI参与：{'是' if data.get('aiType') == 1 else '否'}
 标签：{data['tags']}'''
 
             # 涩图过滤
-            if any(word in data['tags'] for word in CENSORED_WORDS):
+            # 修复：data['tags'] 是标签**列表**，原来的 `word in data['tags']` 是"精确相等"匹配，
+            # 只有标签与敏感词一字不差才拦得住（像 "R-18 (漫画)" 这种就漏过去了）。
+            # 这里改成对整串标签做不区分大小写的子串匹配。
+            _tags_text = " ".join(str(t) for t in (data.get('tags') or [])).lower()
+            if any(str(word).lower() in _tags_text for word in CENSORED_WORDS):
                 await actions.del_message(selfID.data.message_id)
                 await actions.send(group_id=event.group_id, message=Manager.Message(Segments.Text(f"你要的图片实在太涩啦！{bot_name}都不敢看了 (⓿_⓿)")))
                 return True

@@ -33,7 +33,7 @@ while True:
         except Exception:
             _pid = 0
         if _pid and _pid_alive(_pid):
-            print(f"检测到LittleFox已在运行（PID {_pid}），为避免多实例重复回复，本次启动已取消。")
+            print(f"检测到机器人已在运行（PID {_pid}），为避免多实例重复回复，本次启动已取消。")
             sys.exit(0)
         try:
             os.remove(_LOCK_PATH)
@@ -44,7 +44,7 @@ import atexit
 atexit.register(lambda: os.path.exists(_LOCK_PATH) and os.remove(_LOCK_PATH))
 # ---------------------------------------------------------------------------
 
-# LittleFox LittleFox QQ 机器人项目
+# 小狐狸 QQ 机器人项目（基于 Jianer QQ Bot / HypeR_bot 框架二次修改）
 # Made by 思锐工作室
 # link: https://github.com/SRInternet-Studio/Jianer_QQ_bot/
 
@@ -466,6 +466,7 @@ plugins = load_plugins() #在任何操作执行之前加载插件
 # 插件运行器 NEXT 3
 async def execute_plugins(isAny: bool, **main_context) -> bool: # 接受 main.py 的上下文，也就是所有的关键字
     has_plugin = False
+    _error_notified = False  # 插件出错只提示用户一次，避免一个坏插件刷屏
     user_message = main_context["order"] if "order" in main_context else ""
 
     # 修复：长关键词优先匹配。原来按目录顺序匹配，短关键词会遮蔽长关键词
@@ -502,8 +503,28 @@ async def execute_plugins(isAny: bool, **main_context) -> bool: # 接受 main.py
 
             except Exception as e:
                 print(f"\n插件 {plugin_module.__name__} 执行出错，是因为: \n{traceback.format_exc()}")
-                if not isAny:
-                    has_plugin = True
+                if isAny:
+                    # "Any" 类插件对每条消息都会执行，它出错绝不能拦下所有消息
+                    continue
+                # 修复：原来这里只把 has_plugin 置 True 就结束 —— 关键词明明命中了，
+                # 用户却一个字都收不到，只有日志里有 traceback。现在补一句可见的提示。
+                has_plugin = True
+                if not _error_notified:
+                    _error_notified = True
+                    try:
+                        _act = main_context.get("actions")
+                        _Mgr = main_context.get("Manager")
+                        _Seg = main_context.get("Segments")
+                        _ev = main_context.get("event")
+                        if _act and _Mgr and _Seg and _ev:
+                            _notice = _Mgr.Message(_Seg.Text(
+                                f"插件 {plugin_module.__name__} 执行出错了，这次没能处理你的消息 (｡•́︿•̀｡)"))
+                            if getattr(_ev, "group_id", None) is not None:
+                                await _act.send(group_id=_ev.group_id, message=_notice)
+                            else:
+                                await _act.send(user_id=_ev.user_id, message=_notice)
+                    except Exception as _e2:
+                        print(f"插件出错提示发送失败: {_e2}")
     
     return has_plugin
 
@@ -936,7 +957,7 @@ async def handler(event: Events.Event, actions: Listener.Actions) -> None:
 Source Model: {EnableNetwork}
 Location: This chat context is not permitted.
 Version: {version_name}
-Document: jianer.isok.dev
+Document: 安装与配置说明.md（本项目）
 
 For more information, see the administrator or check the system logs.''')))
                 return
@@ -1447,17 +1468,15 @@ if failed_plugins else "无"}'''
 由 {framework.get("app_name")} {framework.get("protocol_version")}-{framework.get("app_version")} 驱动
 基于 Hype𝐑_bot 框架制作
 ————————————————————
-第三方API
-1. Mirokoi API
-2. Lolicon API
-3. LoliAPI API
-4. ChatGPT 3.5
-5. ChatGPT 4o-mini
-6. Google gemini-2.0
-7. DeepSeek V3
-8. EdgeTTS
+第三方服务
+1. DuckDuckGo（联网搜索，免 Key）
+2. Lolicon API + 栗次元/兜底图源（ACG / Pixiv 图片）
+3. 一言 v1.hitokoto.cn
+4. 微软 Edge 神经语音 EdgeTTS（免 Key）
+5. DeepSeek（本地 LM Studio 或云端中转，由 ai_backend 决定）
+6. Google Gemini、OpenAI ChatGPT（需在 config.json 填对应 Key）
 ————————————————————
-jianer.isok.dev © 2019~{datetime.datetime.now().year} SR思锐团队 保留所有权利'''
+基于 Jianer QQ Bot（© 2019~{datetime.datetime.now().year} SR思锐团队，GPL-3.0）二次修改；本机为本地部署版'''
 
             await actions.send(group_id=event.group_id, message=Manager.Message(Segments.Text(about)))
 
@@ -1710,8 +1729,13 @@ CPU占用：{str(system_info["cpu_usage"]) + "%"}
                 complete = False
                 for i in event.message:
                     if isinstance(i, Segments.At):
+                        # 修复：@全体成员的 At 片段 qq 是 "all"，str 出来没有数字，
+                        # 原来 numbers[0] 会抛 IndexError（该分支没有 try），
+                        # 而且会在到达下面 "@all" 分支之前就崩掉。非数字 At 交给 "@all" 分支处理。
+                        if not str(i.qq).isdigit():
+                            continue
                         print("At in loading...")
-                        userid114 = numbers[0]  
+                        userid114 = str(i.qq)  
                         time114 = 0
                         await actions.set_group_ban(group_id=event.group_id,user_id=userid114,duration=time114)
                         complete = True
@@ -1737,8 +1761,12 @@ CPU占用：{str(system_info["cpu_usage"]) + "%"}
                         complete = False
                         for i in event.message:
                             if isinstance(i, Segments.At):
-                                userid114 = numbers[0]  
-                                time114 = numbers[1]
+                                # 修复：@全体成员(qq="all") 时 numbers 里只有时长，
+                                # numbers[1] 会 IndexError，导致 ~冷静 @全体成员 60 永远失败。
+                                if not str(i.qq).isdigit():
+                                    continue
+                                userid114 = str(i.qq)
+                                time114 = numbers[-1] if numbers else 0
                                 
                                 if str(userid114) == str(event.user_id):
                                     await actions.send(group_id=event.group_id, message=Manager.Message(Segments.Text(f"你抖M是吧！{bot_name}生气了！自己找个没人的地方自己处理自己去，懒得理你 ┗(•̀へ •́ ╮)")))
@@ -1816,11 +1844,19 @@ CPU占用：{str(system_info["cpu_usage"]) + "%"}
                                    "🎙️ 本会话当前声线：" + voice_sel_for(event) + "\n" + list_voices()
                                    + "\n用法：~音色 晓晓 / ~音色 云希 / ~音色 男生 / ~音色 女生")
             else:
-                _vid = _resolve_voice(_name)
-                set_voice_sel(event, _name)
-                _gd = "男" if str(_vid).startswith("zh-CN-Yun") else "女"
-                await _voice_reply(actions, Manager, Segments, event,
-                                   f"🔊 已把本会话声线设为「{_name}」（{_gd}声）~ 之后语音对话和朗读都会用这个声音。")
+                # 与私聊分支保持一致：只接受已知音色 / 性别快捷 / zh-CN 开头的完整 id。
+                # 原来群聊分支对任何字符串都直接 set_voice_sel，存进去又被 voice_sel_for()
+                # 静默回退成默认音色，用户表现为"设了没反应"。
+                if _name in EDGE_VOICES or _name in GENDER_DEFAULT or _name.startswith("zh-CN-"):
+                    _vid = _resolve_voice(_name)
+                    set_voice_sel(event, _name)
+                    _gd = "男" if str(_vid).startswith("zh-CN-Yun") else "女"
+                    await _voice_reply(actions, Manager, Segments, event,
+                                       f"🔊 已把本会话声线设为「{_name}」（{_gd}声）~ 之后语音对话和朗读都会用这个声音。")
+                else:
+                    await _voice_reply(actions, Manager, Segments, event,
+                                       f"😶 没找到「{_name}」这个音色哦（本机只支持 zh-CN 系列音色）。\n" + list_voices()
+                                       + "\n用法：~音色 晓晓 / ~音色 云希 / ~音色 男生 / ~音色 女生")
             return
 
         elif order.startswith("语音"):
@@ -1872,7 +1908,9 @@ CPU占用：{str(system_info["cpu_usage"]) + "%"}
                             await actions.send(group_id=event.group_id, message=Manager.Message(Segments.Text("头衔不能超过6个字！")))
                         else:
                             try:  
-                                await actions.custom.set_group_special_title(group_id=event.group_id, user_id=userid114, title=title114)
+                                # 修复：OneBot v11 的 set_group_special_title 参数名是 special_title，
+                                # 不是 title（Hyper 的 actions.custom 会把 kwargs 原样透传给 OneBot 接口）。
+                                await actions.custom.set_group_special_title(group_id=event.group_id, user_id=userid114, special_title=title114, duration=-1)
                                 await actions.send(group_id=event.group_id, message=Manager.Message(Segments.Text("已设置！")))
                             except Exception as set_title_error:
                                 print(f"设置头衔失败: {set_title_error}")
@@ -1893,7 +1931,8 @@ CPU占用：{str(system_info["cpu_usage"]) + "%"}
                 await actions.send(group_id=event.group_id,message=Manager.Message(Segments.Text("头衔不能超过6个字！")))
             else:
                 if str(event.user_id) in SUPERS:
-                    await actions.custom.set_group_special_title(group_id=event.group_id,user_id=event.user_id,title=titletext)
+                    # 修复：同上，参数名应为 special_title
+                    await actions.custom.set_group_special_title(group_id=event.group_id,user_id=event.user_id,special_title=titletext,duration=-1)
                     await actions.send(group_id=event.group_id,message=Manager.Message(Segments.Text("已设置！")))
                 else:
                     if self_service_titles:

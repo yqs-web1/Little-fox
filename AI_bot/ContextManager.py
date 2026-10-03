@@ -30,7 +30,7 @@ class ContextManager:
                 self.groups[gid][uin] = Context(
                     api_key=key, 
                     model=model, 
-                    base_url=config.others["gemini_base_url"], 
+                    base_url=config.others.get("gemini_base_url") or "https://generativelanguage.googleapis.com/", 
                     tools=tools,
                     system_instruction=system_instruction or sys_prompt,
                     generation_config=generation_config
@@ -41,7 +41,7 @@ class ContextManager:
                 self.groups[gid][uin] = Context(
                     api_key=key, 
                     model=model, 
-                    base_url=config.others["gemini_base_url"], 
+                    base_url=config.others.get("gemini_base_url") or "https://generativelanguage.googleapis.com/", 
                     tools=tools,
                     system_instruction=system_instruction or sys_prompt,
                     generation_config=generation_config

@@ -27,11 +27,15 @@ async def amain(TEXT, voiceColor, rate, volume, pitch):
         communicate = edge_tts.Communicate(TEXT, voiceColor, rate = rate, volume=volume, pitch=pitch)
 
         tts_num = 0
-        output_path_base = r"./responseVoice"
-        output_path = f"{os.path.abspath(output_path_base)}_{tts_num}.wav"
+        # 修复：原来拼的是 <项目路径>/responseVoice_0.wav（少了分隔符），临时音频会落在**项目根目录**
+        # 而不是 responseVoice/ 里，合成失败时还会在根目录留下 0 字节文件。
+        # 现在统一写进 responseVoice/ 目录。
+        output_dir = os.path.abspath("./responseVoice")
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, f"edge_{tts_num}.wav")
         while os.path.exists(output_path):
             tts_num += 1
-            output_path = f"{os.path.abspath(output_path_base)}_{tts_num}.wav"
+            output_path = os.path.join(output_dir, f"edge_{tts_num}.wav")
 
         await communicate.save(output_path)
 

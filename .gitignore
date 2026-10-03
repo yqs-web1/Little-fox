@@ -199,6 +199,11 @@ secrets.env
 *.key
 .env
 
+# --- 向导运行时状态：webui.json 里存着向导访问 token，appsettings.json 含账号 uin ---
+webui.json
+appsettings.json
+instances.json
+
 # --- 手工备份文件（历史版本已在 git 提交历史里，不再散落工作区）---
 *.bak
 *.bak_*
