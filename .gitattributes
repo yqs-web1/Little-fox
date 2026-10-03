@@ -1,2 +1,7 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Windows 批处理必须保持 CRLF：cmd 对 LF-only 的 .bat 解析本来就脆弱
+# （if 块、goto 标签等会出莫名其妙的错）。这里显式钉住，避免检出后又变回 LF。
+*.bat text eol=crlf
+*.cmd text eol=crlf
