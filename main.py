@@ -54,7 +54,7 @@ print(title() + "\nWelcome to Jianer QQ Bot, Starting Kernal now...", end="\r")
 
 from Tools.GoogleAI import Context
 from Tools.Sanitizer_Tools import sanitize_for_tts
-from Tools.tts_local import speak_and_send, parse_voice_args, list_voices, _resolve_voice, EDGE_VOICES, GENDER_DEFAULT
+from Tools.tts_local import speak_and_send, parse_voice_args, list_voices, _resolve_voice, EDGE_VOICES, GENDER_DEFAULT, speakable_text
 from AI_bot.AIKernal import AIKernal
 from AI_bot.ContextManager import ContextManager, user_lists
 
@@ -78,6 +78,9 @@ os.chdir(os.path.dirname(os.path.abspath(sys.argv[0])))
 from Hyper import Configurator
 Configurator.cm = Configurator.ConfigManager(Configurator.Config(file="config.json").load_from_file())
 from Tools import ai_backend  # 本地/云端 AI 后端解析（必须在 Configurator.cm 初始化之后导入）
+from Tools.reply import reply_send, quote_target  # 统一回复出口：私聊自动带引用
+from Tools import presence  # 私聊「正在输入」气泡（NapCat set_input_status）
+from Tools import bubble  # 私聊「正在思考」占位气泡（延迟出现 + 回复前撤回）
 from Hyper import Listener, Events, Logger, Manager, Segments
 from Hyper.Utils import Logic
 from Hyper.Events import *
@@ -103,8 +106,8 @@ def load_consent() -> set:
 
 def save_consent(asked: set):
     try:
-        with open(CONSENT_FILE, "w", encoding="utf-8") as _f:
-            json.dump(sorted(asked), _f, ensure_ascii=False, indent=2)
+        # 同样改为原子替换：并发写不会再产生截断 JSON
+        _atomic_write_json(CONSENT_FILE, sorted(asked))
     except Exception as _e:
         print(f"保存同意记录失败: {_e}")
 
@@ -130,6 +133,49 @@ self_service_titles = False
 
 # AI Settings
 EnableNetwork = config.others.get("default_mode", "Ds")
+
+# ============ 需求④⑤ 新增：用户档案 + 模型三级解析 ============
+from Tools import userstore as _userstore
+from Tools import model_registry as _models
+
+try:
+    _userstore.init()
+except Exception as _e:
+    print(f"[启动] 用户库初始化失败（档案功能降级）：{_e}")
+
+
+def model_for(event) -> str:
+    """按 用户 > 群 > 全局 解析当前该用哪个模型（需求⑤）。"""
+    try:
+        return _models.scoped_model_id(getattr(event, "user_id", None),
+                                       getattr(event, "group_id", None))
+    except Exception as _e:
+        print(f"[模型] 作用域解析失败，回落默认_mode：{_e}")
+        return ""
+
+
+def profile_block(event, display_name: str = "") -> str:
+    """生成用户画像文本，拼进 system prompt，让机器人"认得"这个人（需求④）。"""
+    try:
+        return _userstore.render_for_prompt(getattr(event, "user_id", None), display_name)
+    except Exception:
+        return ""
+
+
+def touch_user(event, kind: str = "text", text: str = "", is_ai: bool = False):
+    """记录一次互动并加好感度（需求④）。任何异常都不影响主流程。"""
+    try:
+        uid = getattr(event, "user_id", None)
+        if uid is None:
+            return
+        _userstore.touch(uid, group_id=getattr(event, "group_id", None),
+                         kind=kind, char_count=len(text or ""), is_ai=is_ai)
+        if not is_ai:
+            delta = 2 if kind == "voice" else 1
+            _userstore.add_affinity(uid, delta,
+                                    daily_cap=int(config.others.get("affinity_daily_cap", 30)))
+    except Exception as _e:
+        print(f"[用户库] 记录互动失败（忽略）：{type(_e).__name__}: {_e}")
 sys_prompt = ""
 cmc = ContextManager() # 上下文管理器
 
@@ -166,6 +212,20 @@ def _set_ai_backend(backend: str) -> bool:
 VOICE_PREFS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voice_prefs.json")
 VOICE_IDLE_SECONDS = 1800  # 30 分钟：超过这么久没聊天，下一次视为“重新首次”，会再次询问
 
+# 并发修复：voice_prefs / consent 原来是「整文件读-改-写」且无锁。
+# Hyper 每条消息一个线程，多人同时改设置会丢写；更糟的是写到一半被另一线程读到，
+# load 的 except 会静默返回 {}，表现为「设置自己变回默认」。
+# 加锁 + 先写临时文件再 os.replace 原子替换，保证任何时刻磁盘上都是完整 JSON。
+_VOICE_IO_LOCK = threading.Lock()
+
+
+def _atomic_write_json(path: str, obj) -> None:
+    with _VOICE_IO_LOCK:
+        _tmp = path + ".tmp"
+        with open(_tmp, "w", encoding="utf-8") as _f:
+            json.dump(obj, _f, ensure_ascii=False, indent=2)
+        os.replace(_tmp, path)
+
 def load_voice_prefs():
     try:
         with open(VOICE_PREFS_FILE, "r", encoding="utf-8") as _f:
@@ -176,8 +236,7 @@ def load_voice_prefs():
 
 def save_voice_prefs(on: dict, seen: dict, voice: dict):
     try:
-        with open(VOICE_PREFS_FILE, "w", encoding="utf-8") as _f:
-            json.dump({"on": on, "seen": seen, "voice": voice}, _f, ensure_ascii=False, indent=2)
+        _atomic_write_json(VOICE_PREFS_FILE, {"on": on, "seen": seen, "voice": voice})
     except Exception as _e:
         print(f"保存语音偏好失败: {_e}")
 
@@ -197,11 +256,19 @@ def set_voice_on(event, value: bool):
     save_voice_prefs(_voice_on, _voice_seen, _voice_sel)
 
 def voice_sel_for(event):
-    """本会话选定的声线（友好名/性别/完整 id），未选则返回默认女声「小艺」。"""
+    """本会话选定的声线（友好名/性别/音效/随机/情绪/完整 id），未选则返回默认女声「小艺」。"""
     _v = _voice_sel.get(get_chat_key(event)) or "小艺"
-    # 防御：存储的音色若已失效（如被移出 EDGE_VOICES 的云泽等），回退默认，避免合成静默失败
-    if _v not in EDGE_VOICES and _v not in GENDER_DEFAULT and not str(_v).startswith("zh-CN-"):
-        _v = "小艺"
+    # 防御：存储的声线若已失效，回退默认，避免合成静默失败。
+    # 需求③：现在还要认得「音效 / 音色+音效 / 随机 / 情绪」这些新写法，否则一选就被重置。
+    try:
+        from Tools.tts_voices import is_voice_name, is_fx_name, split_selection
+        _a, _b = split_selection(_v)
+        _a_ok = bool(_a) and (is_voice_name(_a) or str(_a).startswith(("zh-", "ja-", "en-", "ko-")))
+        if not (_a_ok or (_b and is_fx_name(_b))) or (_b and not is_fx_name(_b)):
+            _v = "小艺"
+    except Exception:
+        if _v not in EDGE_VOICES and _v not in GENDER_DEFAULT and not str(_v).startswith("zh-CN-"):
+            _v = "小艺"
     return _v
 
 def set_voice_sel(event, name: str):
@@ -247,11 +314,8 @@ VOICE_OFFER_TEXT = (
 )
 
 async def _voice_reply(actions, Manager, Segments, event, text):
-    """语音相关提示统一发送：群聊发群、私聊发私聊。"""
-    if getattr(event, "group_id", None) is not None:
-        await actions.send(group_id=event.group_id, message=Manager.Message(Segments.Text(text)))
-    else:
-        await actions.send(user_id=event.user_id, message=Manager.Message(Segments.Text(text)))
+    """语音相关提示统一发送：群聊发群、私聊发私聊（私聊按配置带引用回复）。"""
+    await reply_send(actions, Manager, Segments, event, text)
 
 def is_explicit_voice_command(user_message, reminder=""):
     """判断是否为「带命令前缀的明确语音指令」（~语音开/关、~音色、~语音、~更改TTS状态）。
@@ -721,7 +785,8 @@ async def handler(event: Events.Event, actions: Listener.Actions) -> None:
                     poke_result = Manager.Ret.fetch(poke_result).data.raw
                     if poke_result.get("status", "error") != "ok":
                         print(f"sys: 戳一戳失败 {poke_result}")
-                    await actions.send(user_id=event.user_id, message=Manager.Message(Segments.Text(random.choice(config.others["poke_rejection_phrases"]))))
+                    await reply_send(actions, Manager, Segments, event,
+                                     random.choice(config.others["poke_rejection_phrases"]))
             except KeyError:
                 print("不接受戳一戳")
                 
@@ -787,14 +852,27 @@ async def handler(event: Events.Event, actions: Listener.Actions) -> None:
     #     await actions.custom.set_friend_add_request(flag=event.flag, approve=True, reason="")
 
     elif isinstance(event, Events.PrivateMessageEvent):
+        # 私聊「对方正在输入」气泡：进分支就亮，长回复期间由后台协程每 4 秒刷新一次。
+        # 仅私聊有效（NapCat 的 set_input_status 只实现了 C2C）；失败会静默降级，不影响回复。
+        presence.start_typing(
+            actions, event,
+            enabled=bool(config.others.get("private_typing_bubble", True)))
+        # 私聊「正在思考」占位气泡：延迟 delay 秒才发出（秒回不留痕迹），
+        # 任何回复出口（reply_send / AIKernal / 语音）发送前会撤回它。
+        bubble.begin(
+            actions, Manager, Segments, event,
+            enabled=bool(config.others.get("thinking_bubble", True)),
+            delay=float(config.others.get("thinking_bubble_delay", 1.5)),
+            text=str(config.others.get("thinking_bubble_text", "...")),
+            max_seconds=float(config.others.get("thinking_bubble_max", 60)))
         # 新用户同意询问：每位用户首次私聊先问一句"是否愿意"，问过即记住、不再重复问
         _asked = load_consent()
         if str(event.user_id) not in _asked:
             _asked.add(str(event.user_id))
             save_consent(_asked)
-            await actions.send(user_id=event.user_id, message=Manager.Message(Segments.Text(
+            await reply_send(actions, Manager, Segments, event,
                 f"嗨，我是{bot_name}～在陪你聊天之前先确认一下：你愿意让我这样陪你聊聊天吗？"
-                f"愿意的话随便回我一句就好，之后咱们就正常聊啦 (｡･ω･｡)")))
+                f"愿意的话随便回我一句就好，之后咱们就正常聊啦 (｡･ω･｡)")
             return
         event_user = await get_user_nickname(event.user_id, Manager, actions)
         await _transcribe_voice(event, Segments)
@@ -803,6 +881,11 @@ async def handler(event: Events.Event, actions: Listener.Actions) -> None:
         if await maybe_voice_offer(actions, Manager, Segments, event, user_message, reminder):
             return
         sys_prompt = presets_tool.gen_presets(event.user_id, bot_name, bot_name_en, event_user)
+        # 需求④：把该用户的档案摘要拼进 system prompt，让机器人认得他
+        _pb = profile_block(event, event_user)
+        if _pb:
+            sys_prompt = f"{sys_prompt}\n\n{_pb}"
+        touch_user(event, kind="text", text=user_message)
         presets = presets_tool.read_presets()
         if user_message.startswith(reminder):
             order_i = user_message.find(reminder)
@@ -812,7 +895,7 @@ async def handler(event: Events.Event, actions: Listener.Actions) -> None:
 
             if "帮助" == order or "用户帮助" == order:
                 content = help_message(event)
-                await actions.send(user_id=event.user_id, message=Manager.Message(Segments.Text(content)))
+                await reply_send(actions, Manager, Segments, event, content)
                 return
             elif "角色扮演" == order:
                 prerequisites_info = f"""{bot_name} {bot_name_en} - 角色扮演后台
@@ -823,7 +906,7 @@ async def handler(event: Events.Event, actions: Listener.Actions) -> None:
 ————————————————————
 若您要管理这些角色，请前往群聊中发送相关指令哦o((>ω< ))o"""
 
-                await actions.send(user_id=event.user_id, message=Manager.Message(Segments.Text(prerequisites_info)))
+                await reply_send(actions, Manager, Segments, event, prerequisites_info)
                 return
             elif order in ("语音开", "开启语音", "语音对话开"):
                 set_voice_on(event, True)
@@ -834,43 +917,141 @@ async def handler(event: Events.Event, actions: Listener.Actions) -> None:
                 await _voice_reply(actions, Manager, Segments, event, "已关闭语音对话，恢复纯文字回复~ 想开随时发 ~语音开")
                 return
             elif order.startswith("音色"):
-                # 设定本会话声线：~音色 小艺 / ~音色 云希 / ~音色 男生 / ~音色 女生（也可直接用完整 id）
+                # 需求③：~音色（列表）/ ~音色 晓晓 / ~音色 男生 / ~音色 花栗鼠 /
+                #          ~音色 晓晓+花栗鼠 / ~音色 随机 / ~音色 情绪 / ~音色 检测
                 _name = order[len("音色"):].strip()
-                if not _name or _name in ("列表", "帮助", "?"):
+                from Tools.tts_voices import is_voice_name, is_fx_name, split_selection
+                if _name in ("检测", "探活", "test"):
+                    import Tools.tts_health as _th
+                    _res = await asyncio.to_thread(_th.probe_all)
+                    _ok = sum(1 for v in _res.values() if v[0])
+                    await _voice_reply(actions, Manager, Segments, event,
+                                       f"🎧 音色探活完成：{_ok}/{len(_res)} 可用\n{_th.summary()}")
+                elif not _name or _name in ("列表", "帮助", "?"):
                     await _voice_reply(actions, Manager, Segments, event,
                                        "🎙️ 本会话当前声线：" + voice_sel_for(event) + "\n" + list_voices()
-                                       + "\n用法：~音色 小艺 / ~音色 云希 / ~音色 男生 / ~音色 女生")
-                elif _name in EDGE_VOICES or _name in GENDER_DEFAULT or _name.startswith("zh-CN-"):
-                    _vid = _resolve_voice(_name)
-                    set_voice_sel(event, _name)
-                    _gd = "男" if str(_vid).startswith("zh-CN-Yun") else "女"
-                    await _voice_reply(actions, Manager, Segments, event,
-                                       f"🔊 已把本会话声线设为「{_name}」（{_gd}声）~ 之后语音对话和朗读都会用这个声音。")
+                                       + f"\n用法：{reminder}音色 晓晓 ｜ {reminder}音色 花栗鼠 ｜ "
+                                         f"{reminder}音色 晓晓+花栗鼠 ｜ {reminder}音色 随机 ｜ "
+                                         f"{reminder}音色 情绪 ｜ {reminder}音色 检测")
                 else:
-                    # 不认识的名字：明确告知并列出全部可选音色（满足“变更语音时告知有哪些音色”）
-                    await _voice_reply(actions, Manager, Segments, event,
-                                       f"😶 没找到「{_name}」这个音色哦。\n" + list_voices()
-                                       + "\n用法：~音色 小艺 / ~音色 云希 / ~音色 男生 / ~音色 女生")
+                    _v, _fx = split_selection(_name)
+                    _v_ok = (not _v) or is_voice_name(_v) or str(_v).startswith(("zh-", "ja-", "en-", "ko-"))
+                    _fx_ok = (not _fx) or is_fx_name(_fx)
+                    if _v_ok and _fx_ok and (_v or _fx):
+                        set_voice_sel(event, _name)
+                        _tail = f"\n（音效：{_fx}）" if _fx else ""
+                        await _voice_reply(actions, Manager, Segments, event,
+                                           f"🔊 已把本会话声线设为「{_name}」~ 之后语音对话和朗读都会用这个。{_tail}")
+                    else:
+                        await _voice_reply(actions, Manager, Segments, event,
+                                           f"😶 没找到「{_name}」这个音色/音效哦。\n" + list_voices())
+                return
+            elif order.startswith("模型"):
+                # 需求⑤：~模型（列表）/ ~模型 3（序号）/ ~模型 推理（别名）
+                #         ~模型 群 <名>（本群默认，管理员）/ ~模型 全局 <名>（ROOT）/ ~模型 状态
+                _rest = order[len("模型"):].strip()
+                _cur = model_for(event)
+                _entry = _models.find(_cur)
+                _cur_txt = _models.render_entry(_entry) if _entry else (_cur or "未配置")
+                if not _rest or _rest in ("列表", "帮助", "?"):
+                    await reply_send(actions, Manager, Segments, event,
+                        f"🧠 你当前的模型：{_cur_txt}\n{_models.listing(_cur)}\n\n"
+                        f"用法：{reminder}模型 3 ｜ {reminder}模型 推理 ｜ "
+                        f"{reminder}模型 群 <名> ｜ {reminder}模型 全局 <名> ｜ {reminder}模型 状态")
+                elif _rest.startswith("状态"):
+                    _models.probe()
+                    await reply_send(actions, Manager, Segments, event,
+                                     "各供应商健康状态：\n" + _models.health_report())
+                elif _rest.startswith("群"):
+                    _name = _rest[1:].strip()
+                    if str(event.user_id) not in ADMINS:
+                        await reply_send(actions, Manager, Segments, event, CONFUSED_WORD.format(bot_name=bot_name))
+                    elif getattr(event, "group_id", None) is None:
+                        await reply_send(actions, Manager, Segments, event, "群默认只能在群聊里设置哦～")
+                    else:
+                        _ok, _msg = _models.set_group_model(event.group_id, _name)
+                        await reply_send(actions, Manager, Segments, event,
+                                         ("✅ 本群默认模型已设为 " + _msg) if _ok else ("😶 " + _msg))
+                elif _rest.startswith("全局"):
+                    _name = _rest[2:].strip()
+                    if str(event.user_id) not in ROOT_User:
+                        await reply_send(actions, Manager, Segments, event, CONFUSED_WORD.format(bot_name=bot_name))
+                    else:
+                        _ok, _msg = _models.set_global_model(_name)
+                        await reply_send(actions, Manager, Segments, event,
+                                         ("✅ 全局默认模型已设为 " + _msg) if _ok else ("😶 " + _msg))
+                elif _rest in ("自动", "auto"):
+                    _userstore.pref_set(event.user_id, "model", "auto")
+                    await reply_send(actions, Manager, Segments, event,
+                                     "🤖 已为本会话开启智能路由：短问题走快模型、推理类走推理模型、带图走多模态。")
+                else:
+                    _ok, _msg = _models.set_user_model(event.user_id, _rest)
+                    if _ok:
+                        # 换了模型必须重建上下文：不同模型的历史格式不兼容
+                        cmc.del_context(event.user_id, event.group_id)
+                    await reply_send(actions, Manager, Segments, event,
+                                     (f"✅ 已切到 {_msg}\n（只影响你自己，上下文已重置）") if _ok else ("😶 " + _msg))
+                return
+            elif order.startswith("用户"):
+                # 需求④：~用户（看我自己的档案）
+                _p = _userstore.get(event.user_id)
+                if not _p:
+                    await reply_send(actions, Manager, Segments, event, "还没有你的档案哦，先聊几句吧～")
+                else:
+                    await reply_send(actions, Manager, Segments, event,
+                        f"📇 你的档案\n"
+                        f"昵称：{_p.get('nickname') or event_user}\n"
+                        f"关系：{_p.get('relation')}（好感度 {_p.get('affinity')}）\n"
+                        f"发言：{_p.get('msg_count')} 条｜语音：{_p.get('voice_count')} 条\n"
+                        f"连续互动：{_p.get('streak_days')} 天｜今天第 {_p.get('today_count')} 次\n"
+                        f"——\n发 {reminder}模型 可看/切换你用的模型")
+                return
+            elif order.startswith("叫我"):
+                # 需求④：让机器人记住你希望被怎么称呼
+                _name = order[len("叫我"):].strip()
+                if not _name:
+                    await reply_send(actions, Manager, Segments, event, f"用法：{reminder}叫我 明明")
+                elif len(_name) > 16:
+                    await reply_send(actions, Manager, Segments, event, "称呼太长啦，16 个字以内好不好～")
+                else:
+                    _userstore.touch(event.user_id, nickname=_name)
+                    _userstore.kv_set(f"u{event.user_id}", "nickname_pref", _name)
+                    await reply_send(actions, Manager, Segments, event, f"好呀，那我以后就叫你「{_name}」啦～")
+                return
+            elif order.startswith("忘记我"):
+                # 需求④：隐私 —— 物理删除该用户的全部档案
+                _userstore.forget(event.user_id)
+                await reply_send(actions, Manager, Segments, event,
+                                 "好啦，关于你的档案我全都删掉了，我们重新认识一下吧～")
                 return
             elif order.startswith("语音"):
                 # 按需语音指令：~语音 [音色:名称] [语速:倍数|快|慢] 文字 —— 微软神经语音朗读，群聊/私聊通用
                 _text, _voice, _rate = parse_voice_args(order[len("语音"):])
                 if not _text:
-                    await actions.send(user_id=event.user_id, message=Manager.Message(Segments.Text(
+                    await reply_send(actions, Manager, Segments, event,
                         f"请在 {reminder}语音 后面加上要朗读的文字，可附带 音色:名称 / 语速:倍数（快/慢）。"
-                        f"例如：{reminder}语音 你好呀，我是{bot_name}～   或   {reminder}语音 语速:1.3 今天天气真好")))
+                        f"例如：{reminder}语音 你好呀，我是{bot_name}～   或   {reminder}语音 语速:1.3 今天天气真好")
                 else:
-                    _ok = await speak_and_send(actions, Manager, Segments, event, _text, voice=_voice or voice_sel_for(event), rate=_rate)
-                    if not _ok:
-                        await actions.send(user_id=event.user_id, message=Manager.Message(Segments.Text(
-                            "语音合成失败：请确认本机已联网（微软神经语音需联网），或已装离线兜底 pyttsx3（venv 执行 pip install pyttsx3 pywin32）。")))
+                    # 修复：先净化再判断 —— 纯表情/符号的文本净化后是空串，
+                    # 原来会一路走到"语音合成失败：请确认本机已联网"，把"没东西可读"误报成网络故障。
+                    _speak = speakable_text(_text)
+                    if not _speak:
+                        await reply_send(actions, Manager, Segments, event,
+                            "这句话里没有可以朗读的文字哦（只有表情/符号/图片）～换句话再试试？")
+                    else:
+                        _ok = await speak_and_send(actions, Manager, Segments, event, _speak,
+                                                   voice=_voice or voice_sel_for(event), rate=_rate,
+                                                   reply_to=quote_target(event))
+                        if not _ok:
+                            await reply_send(actions, Manager, Segments, event,
+                                "语音合成失败：请确认本机已联网（微软神经语音需联网），或已装离线兜底 pyttsx3（venv 执行 pip install pyttsx3 pywin32）。")
                 return
             else:
                 presets, p_info, is_changed = presets_tool.change_presets(presets, order, event)
                 if is_changed:
                     # 清除ContextManager和user_lists中的单个用户上下文
                     cmc.del_context(event.user_id, event.group_id)
-                    await actions.send(user_id=event.user_id, message=Manager.Message(Segments.Text(p_info)))
+                    await reply_send(actions, Manager, Segments, event, p_info)
                     return
 
         # ===== 高数拍照解题（私聊：必须显式 ~高数 才触发，避免吞掉普通图片消息）=====
@@ -880,21 +1061,28 @@ async def handler(event: Events.Event, actions: Listener.Actions) -> None:
                 from Tools.vision_solve import solve_math_image
                 _extra = order[len("高数"):].strip()
                 _reply = await solve_math_image(event.message, _extra, bot_name)
-                await actions.send(user_id=event.user_id, message=Manager.Message(Segments.Text(_reply)))
+                await reply_send(actions, Manager, Segments, event, _reply)
                 return
         except Exception as e:
             print(f"[高数拍照-私聊] 处理出错: {e}")
 
         # 语音对话模式：开启时只发语音、不发文字（emit_text=False 让 AIKernal 不发送文字，仅返回文本供 TTS）
         if voice_on_for(event):
-            cmc, user_lists, result = await AIbot.generate_response(EnableNetwork, cmc, sys_prompt, user_lists, event, emit_text=False)
-            _ok = await speak_and_send(actions, Manager, Segments, event, sanitize_for_tts(result), voice=voice_sel_for(event))
+            cmc, user_lists, result = await AIbot.generate_response(EnableNetwork, cmc, sys_prompt, user_lists, event, emit_text=False, model_id=model_for(event))
+            # 修复：先净化再判断。纯表情/符号的回复净化后是空串，而原来的两条路
+            # （语音合成失败 → reply_send(净化后的空串)）发的都是空内容，reply_send 会把空串直接丢掉，
+            # 用户于是彻底收不到任何回复（既没声音也没文字）。
+            _speak = speakable_text(result)
+            _ok = False
+            if _speak:
+                _ok = await speak_and_send(actions, Manager, Segments, event, _speak,
+                                           voice=voice_sel_for(event), reply_to=quote_target(event))
             if not _ok:
-                # 语音合成失败（如断网）：兜底把文字发出来，避免“无回复”
-                await actions.send(user_id=event.user_id, message=Manager.Message(Segments.Text(sanitize_for_tts(result))))
+                # 兜底：能读就用净化后的文本；净化后为空（纯表情）就发原文；连原文都空才用占位符
+                await reply_send(actions, Manager, Segments, event, _speak or (result or "").strip() or "……")
         else:
             # 文字模式：AIKernal 流式过程中已发送文字（含空回复兜底），此处不再发，否则每条回复重复两遍
-            cmc, user_lists, result = await AIbot.generate_response(EnableNetwork, cmc, sys_prompt, user_lists, event)
+            cmc, user_lists, result = await AIbot.generate_response(EnableNetwork, cmc, sys_prompt, user_lists, event, model_id=model_for(event))
 
     elif isinstance(event, Events.GroupMessageEvent):
         global second_start
@@ -910,6 +1098,10 @@ async def handler(event: Events.Event, actions: Listener.Actions) -> None:
                     
         # 初始化预设
         sys_prompt = presets_tool.gen_presets(event.user_id, bot_name, bot_name_en, event_user)
+        # 需求④：群聊里同样注入说话人的档案摘要
+        _pb = profile_block(event, event_user)
+        if _pb:
+            sys_prompt = f"{sys_prompt}\n\n{_pb}"
         presets = presets_tool.read_presets()
         
         if len(event.message) <= 0:
@@ -1836,27 +2028,73 @@ CPU占用：{str(system_info["cpu_usage"]) + "%"}
                                 if _new else "已关闭语音对话，恢复纯文字回复~ 想开随时发 ~语音开"))
             return
 
+        elif order.startswith("模型"):
+            # 需求⑤：群聊也可用；~模型 群 <名> 设置本群默认（管理员）
+            _rest = order[len("模型"):].strip()
+            _cur = model_for(event)
+            _entry = _models.find(_cur)
+            _cur_txt = _models.render_entry(_entry) if _entry else (_cur or "未配置")
+            if not _rest or _rest in ("列表", "帮助", "?"):
+                await _voice_reply(actions, Manager, Segments, event,
+                    f"🧠 你当前的模型：{_cur_txt}\n{_models.listing(_cur)}\n\n"
+                    f"用法：{reminder}模型 3 ｜ {reminder}模型 推理 ｜ "
+                    f"{reminder}模型 群 <名>（管理员设本群默认）｜ {reminder}模型 状态")
+            elif _rest.startswith("状态"):
+                _models.probe()
+                await _voice_reply(actions, Manager, Segments, event,
+                                   "各供应商健康状态：\n" + _models.health_report())
+            elif _rest.startswith("群"):
+                if str(event.user_id) not in ADMINS:
+                    await _voice_reply(actions, Manager, Segments, event, CONFUSED_WORD.format(bot_name=bot_name))
+                else:
+                    _ok, _msg = _models.set_group_model(event.group_id, _rest[1:].strip())
+                    await _voice_reply(actions, Manager, Segments, event,
+                                       ("✅ 本群默认模型已设为 " + _msg) if _ok else ("😶 " + _msg))
+            elif _rest.startswith("全局"):
+                if str(event.user_id) not in ROOT_User:
+                    await _voice_reply(actions, Manager, Segments, event, CONFUSED_WORD.format(bot_name=bot_name))
+                else:
+                    _ok, _msg = _models.set_global_model(_rest[2:].strip())
+                    await _voice_reply(actions, Manager, Segments, event,
+                                       ("✅ 全局默认模型已设为 " + _msg) if _ok else ("😶 " + _msg))
+            elif _rest in ("自动", "auto"):
+                _userstore.pref_set(event.user_id, "model", "auto")
+                await _voice_reply(actions, Manager, Segments, event, "🤖 已为你开启智能路由。")
+            else:
+                _ok, _msg = _models.set_user_model(event.user_id, _rest)
+                if _ok:
+                    cmc.del_context(event.user_id, event.group_id)
+                await _voice_reply(actions, Manager, Segments, event,
+                    (f"✅ 已切到 {_msg}\n（只影响你自己，上下文已重置）") if _ok else ("😶 " + _msg))
+            return
         elif order.startswith("音色"):
-            # 设定本会话声线：~音色 晓晓 / ~音色 云希 / ~音色 男生 / ~音色 女生（也可直接用完整 id）
+            # 需求③：与私聊分支保持一致的支持范围（含 音效 / 随机 / 情绪 / 检测）
             _name = order[len("音色"):].strip()
-            if not _name or _name in ("列表", "帮助", "?"):
+            from Tools.tts_voices import is_voice_name, is_fx_name, split_selection
+            if _name in ("检测", "探活", "test"):
+                import Tools.tts_health as _th
+                _res = await asyncio.to_thread(_th.probe_all)
+                _ok = sum(1 for v in _res.values() if v[0])
+                await _voice_reply(actions, Manager, Segments, event,
+                                   f"🎧 音色探活完成：{_ok}/{len(_res)} 可用\n{_th.summary()}")
+            elif not _name or _name in ("列表", "帮助", "?"):
                 await _voice_reply(actions, Manager, Segments, event,
                                    "🎙️ 本会话当前声线：" + voice_sel_for(event) + "\n" + list_voices()
-                                   + "\n用法：~音色 晓晓 / ~音色 云希 / ~音色 男生 / ~音色 女生")
+                                   + f"\n用法：{reminder}音色 晓晓 ｜ {reminder}音色 花栗鼠 ｜ "
+                                     f"{reminder}音色 晓晓+花栗鼠 ｜ {reminder}音色 随机 ｜ "
+                                     f"{reminder}音色 情绪 ｜ {reminder}音色 检测")
             else:
-                # 与私聊分支保持一致：只接受已知音色 / 性别快捷 / zh-CN 开头的完整 id。
-                # 原来群聊分支对任何字符串都直接 set_voice_sel，存进去又被 voice_sel_for()
-                # 静默回退成默认音色，用户表现为"设了没反应"。
-                if _name in EDGE_VOICES or _name in GENDER_DEFAULT or _name.startswith("zh-CN-"):
-                    _vid = _resolve_voice(_name)
+                _v, _fx = split_selection(_name)
+                _v_ok = (not _v) or is_voice_name(_v) or str(_v).startswith(("zh-", "ja-", "en-", "ko-"))
+                _fx_ok = (not _fx) or is_fx_name(_fx)
+                if _v_ok and _fx_ok and (_v or _fx):
                     set_voice_sel(event, _name)
-                    _gd = "男" if str(_vid).startswith("zh-CN-Yun") else "女"
+                    _tail = f"\n（音效：{_fx}）" if _fx else ""
                     await _voice_reply(actions, Manager, Segments, event,
-                                       f"🔊 已把本会话声线设为「{_name}」（{_gd}声）~ 之后语音对话和朗读都会用这个声音。")
+                                       f"🔊 已把本会话声线设为「{_name}」~ 之后语音对话和朗读都会用这个。{_tail}")
                 else:
                     await _voice_reply(actions, Manager, Segments, event,
-                                       f"😶 没找到「{_name}」这个音色哦（本机只支持 zh-CN 系列音色）。\n" + list_voices()
-                                       + "\n用法：~音色 晓晓 / ~音色 云希 / ~音色 男生 / ~音色 女生")
+                                       f"😶 没找到「{_name}」这个音色/音效哦。\n" + list_voices())
             return
 
         elif order.startswith("语音"):
@@ -1867,10 +2105,18 @@ CPU占用：{str(system_info["cpu_usage"]) + "%"}
                     f"请在 {reminder}语音 后面加上要朗读的文字，可附带 音色:名称 / 语速:倍数（快/慢）。"
                     f"例如：{reminder}语音 你好呀，我是{bot_name}～   或   {reminder}语音 语速:1.3 今天天气真好")))
             else:
-                _ok = await speak_and_send(actions, Manager, Segments, event, _text, voice=_voice, rate=_rate)
-                if not _ok:
+                # 修复：同私聊分支 —— 纯表情/符号没有可朗读内容时要说清楚，
+                # 而不是回一句"语音合成失败，请检查联网"（把 A 类问题误报成 B 类故障）。
+                _speak = speakable_text(_text)
+                if not _speak:
                     await actions.send(group_id=event.group_id, message=Manager.Message(Segments.Text(
-                        "语音合成失败：请确认本机已联网（微软神经语音需联网），或已装离线兜底 pyttsx3（venv 执行 pip install pyttsx3 pywin32）。")))
+                        "这句话里没有可以朗读的文字哦（只有表情/符号/图片）～换句话再试试？")))
+                else:
+                    _ok = await speak_and_send(actions, Manager, Segments, event, _speak,
+                                               voice=_voice or voice_sel_for(event), rate=_rate)
+                    if not _ok:
+                        await actions.send(group_id=event.group_id, message=Manager.Message(Segments.Text(
+                            "语音合成失败：请确认本机已联网（微软神经语音需联网），或已装离线兜底 pyttsx3（venv 执行 pip install pyttsx3 pywin32）。")))
             return
 
         elif f"{reminder}表情复述" == user_message:
@@ -1983,14 +2229,21 @@ CPU占用：{str(system_info["cpu_usage"]) + "%"}
             try:
                 if voice_on_for(event):
                     # 语音对话模式：只发语音、不发文字（emit_text=False 让 AIKernal 不发文字，仅返回文本供 TTS）
-                    cmc, user_lists, result = await AIbot.generate_response(EnableNetwork, cmc, sys_prompt, user_lists, event, emit_text=False)
-                    _ok = await speak_and_send(actions, Manager, Segments, event, sanitize_for_tts(result), voice=voice_sel_for(event))
+                    cmc, user_lists, result = await AIbot.generate_response(EnableNetwork, cmc, sys_prompt, user_lists, event, emit_text=False, model_id=model_for(event))
+                    # 修复：纯表情/符号的回复净化后为空 —— 原来语音和文字兜底发的都是空 Text
+                    # （QQ 会显示"该消息类型暂不支持查看"），等于既没声音也没内容。
+                    _speak = speakable_text(result)
+                    _ok = False
+                    if _speak:
+                        _ok = await speak_and_send(actions, Manager, Segments, event, _speak, voice=voice_sel_for(event))
                     if not _ok:
-                        # 语音失败（如断网）：兜底发文字，避免无回复
-                        await actions.send(group_id=event.group_id, message=Manager.Message(Segments.Reply(event.message_id), Segments.Text(sanitize_for_tts(result))))
+                        # 兜底：优先净化后的文本；纯表情就发原文；都为真空才用占位符
+                        await actions.send(group_id=event.group_id, message=Manager.Message(
+                            Segments.Reply(event.message_id),
+                            Segments.Text(_speak or (result or "").strip() or "……")))
                 else:
                     # 文字模式：AIKernal 流式已发文字，此处不再发
-                    cmc, user_lists, result = await AIbot.generate_response(EnableNetwork, cmc, sys_prompt, user_lists, event)
+                    cmc, user_lists, result = await AIbot.generate_response(EnableNetwork, cmc, sys_prompt, user_lists, event, model_id=model_for(event))
 
             except UnboundLocalError:
                 raise

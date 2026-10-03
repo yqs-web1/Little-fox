@@ -3,7 +3,7 @@ from typing import Tuple, Optional, Any
 import platform
 import psutil
 import pynvml
-import io, gc, os
+import io, gc, os, uuid
 import edge_tts
 from .user_info import get_user_info_from_websocket, get_nickname_by_userid
 from urllib.parse import urlparse, urlunparse
@@ -27,15 +27,12 @@ async def amain(TEXT, voiceColor, rate, volume, pitch):
         communicate = edge_tts.Communicate(TEXT, voiceColor, rate = rate, volume=volume, pitch=pitch)
 
         tts_num = 0
-        # 修复：原来拼的是 <项目路径>/responseVoice_0.wav（少了分隔符），临时音频会落在**项目根目录**
-        # 而不是 responseVoice/ 里，合成失败时还会在根目录留下 0 字节文件。
-        # 现在统一写进 responseVoice/ 目录。
+        # 修复并发竞态：原来用「检查文件是否存在 → 递增」挑文件名，多线程（Hyper 每条消息
+        # 一个线程）并发合成时会选中同一个名字互相覆盖 —— 表现为 A 用户听到 B 用户的语音。
+        # 改用 uuid，从根上消除竞态。
         output_dir = os.path.abspath("./responseVoice")
         os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, f"edge_{tts_num}.wav")
-        while os.path.exists(output_path):
-            tts_num += 1
-            output_path = os.path.join(output_dir, f"edge_{tts_num}.wav")
+        output_path = os.path.join(output_dir, f"edge_{uuid.uuid4().hex}.wav")
 
         await communicate.save(output_path)
 

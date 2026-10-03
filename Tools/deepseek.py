@@ -1,8 +1,35 @@
-import openai, time, httpx
+import openai, time, httpx, threading
 import traceback
 from Tools.AI_tools import *
 from Tools import ai_backend
 from Hyper import Configurator
+
+# ---- 客户端复用（按 base_url + key 缓存）----
+# 原来每个 dsr114 实例（= 每条消息）都新建 openai.OpenAI -> httpx.Client，
+# 等于每条消息都重做一次 TCP+TLS 握手，连接池完全没起作用。
+# 100 人并发下这是纯粹的浪费，改为模块级按签名复用。
+_CLIENTS: dict = {}
+_CLIENT_LOCK = threading.Lock()
+
+
+def _shared_client(base_url: str, key: str):
+    sig = (base_url or "", key or "")
+    c = _CLIENTS.get(sig)
+    if c is not None:
+        return c
+    with _CLIENT_LOCK:
+        c = _CLIENTS.get(sig)
+        if c is None:
+            c = openai.OpenAI(
+                api_key=key,
+                base_url=base_url or "https://api.deepseek.com/",
+                default_headers=ai_backend.get_extra_headers() or None,
+                http_client=httpx.Client(proxy=None, trust_env=False,
+                                         timeout=httpx.Timeout(120.0, connect=20.0)),
+            )
+            _CLIENTS[sig] = c
+        return c
+
 
 class dsr114():
     def __init__(self, prompt, message, user_lists, uid, mode, bn, key) -> None:
@@ -23,18 +50,9 @@ class dsr114():
         #   1. 本地 127.0.0.1 被系统代理（HTTP_PROXY 等）接管会直接 Connection error；
         #   2. 中转站的流式 SSE 响应经代理会被缓冲破坏，退化成非流式 JSON，机器人拿不到分片。
         # 注意：httpx 的 proxy=None 等于默认值，并不禁用环境代理，必须 trust_env=False。
-        # 签名不同（base_url 或 key 变了）就重建 client，否则换了后端还在用旧连接池。
-        key = ai_backend.get_api_key()
-        sig = (base_url, key)
-        if self._client is None or self._client_sig != sig:
-            self._client = openai.OpenAI(
-                api_key=key,
-                base_url=base_url or "https://api.deepseek.com/",
-                default_headers=ai_backend.get_extra_headers() or None,
-                http_client=httpx.Client(proxy=None, trust_env=False, timeout=httpx.Timeout(120.0, connect=20.0)),
-            )
-            self._client_sig = sig
-        return self._client
+        # 需求⑤：传 base_url 让多供应商各用各的 Key（key_env）。
+        key = ai_backend.get_api_key(base_url)
+        return _shared_client(base_url, key)
 
     @staticmethod
     def _fix_alternation(messages):

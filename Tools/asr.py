@@ -28,6 +28,23 @@ _LOAD_LOCK = threading.Lock()   # 仅用于模型加载
 _RUN_LOCK = threading.Lock()    # 序列化 transcribe 调用
 
 
+def _cfg_number(key, default):
+    """从 config.json 的 Others 段取一个数字（控制台可改这两项）。
+
+    asr_timeout_seconds : 下载语音的超时秒数（默认 30）
+    asr_max_seconds     : 单条语音最长处理秒数，0 = 不限制（默认 0）
+    读不到（没接 Configurator / 没配这项）就用默认值，绝不让 ASR 因为读配置而失败。
+    """
+    try:
+        from Hyper import Configurator
+        raw = (Configurator.cm.get_cfg().others or {}).get(key)
+        if raw is None or raw == "":
+            return default
+        return float(raw)
+    except Exception:
+        return default
+
+
 def _load_model(name="base"):
     global _MODEL, _MODEL_NAME
     with _LOAD_LOCK:
@@ -72,8 +89,10 @@ def _resolve_record_file(seg):
     return None
 
 
-def _download(url, timeout=30):
+def _download(url, timeout=None):
     import urllib.request
+    if not timeout:
+        timeout = _cfg_number("asr_timeout_seconds", 30)   # 控制台「ASR 下载超时」可调
     p = tempfile.mktemp(suffix=".silk")
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=timeout) as resp, open(p, "wb") as fp:
@@ -158,9 +177,95 @@ def transcribe_record(seg, model="base", language="zh"):
     return transcribe_wav(wav, model=model, language=language)
 
 
+def _is_riff_wav(path):
+    """按文件头判断是不是真正的 wav（不能看扩展名，见 _ensure_16k_wav 说明）。"""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(12)
+        return len(head) >= 12 and head[:4] == b"RIFF" and head[8:12] == b"WAVE"
+    except Exception:
+        return False
+
+
+def _ensure_16k_wav(path):
+    """保证拿到真正的 16k 单声道 wav。
+
+    注意：这里必须按文件头判断真实格式，**不能只看扩展名** ——
+    edge-tts 保存出来的文件虽然叫 .wav，内容其实是 MP3
+    （audio-24khz-48kbitrate-mono-mp3），直接交给标准库 wave 会报
+        wave.Error: file does not start with RIFF id
+    非真 wav 一律用项目自带的完整版 ffmpeg 转成 16k 单声道 wav。
+    """
+    if _is_riff_wav(path):
+        return path
+    import subprocess
+    _ff = _get_ffmpeg()
+    _out = os.path.splitext(path)[0] + ".16k.wav"
+    subprocess.run([_ff, "-y", "-i", path, "-ar", "16000", "-ac", "1", _out],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not os.path.isfile(_out):
+        raise RuntimeError("ffmpeg 未生成 16k wav")
+    return _out
+
+
+def _decode_wav_to_float32(path, target_sr=16000):
+    """wav -> faster-whisper 需要的 float32 单声道 numpy 数组。
+
+    为什么不用 faster-whisper 自带的解码器：它内部走 PyAV 的
+        av.open(input_file, mode="r", metadata_errors="ignore")
+    而 PyAV 19 已移除 metadata_errors 参数，会抛
+        TypeError: open() got an unexpected keyword argument 'metadata_errors'
+    直接传 numpy 数组可让 faster-whisper 跳过 decode_audio（见其 transcribe() 里的
+    `if not isinstance(audio, np.ndarray)` 判断），从而完全绕开该不兼容，
+    且不引入任何新的第三方依赖（wave 是标准库，numpy 本项目已依赖）。
+    """
+    import wave
+    import numpy as np
+
+    with wave.open(path, "rb") as wf:
+        n_ch = wf.getnchannels()
+        sw = wf.getsampwidth()
+        sr = wf.getframerate()
+        raw = wf.readframes(wf.getnframes())
+
+    if sw == 2:
+        data = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    elif sw == 4:
+        data = np.frombuffer(raw, dtype="<i4").astype(np.float32) / 2147483648.0
+    elif sw == 1:
+        data = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    else:
+        raise RuntimeError(f"不支持的采样位宽：{sw * 8} bit")
+
+    if n_ch > 1:
+        data = data.reshape(-1, n_ch).mean(axis=1)
+
+    # whisper 固定要求 16kHz；QQ 语音解码出来通常是 24kHz，这里线性重采样
+    if sr != target_sr and len(data) > 1:
+        n_out = int(round(len(data) * target_sr / sr))
+        data = np.interp(np.linspace(0, len(data) - 1, n_out),
+                         np.arange(len(data)), data).astype(np.float32)
+
+    return np.ascontiguousarray(data, dtype=np.float32)
+
+
 def transcribe_wav(wav_path, model="base", language="zh"):
     m = _load_model(model)
+    audio = _decode_wav_to_float32(_ensure_16k_wav(wav_path))
+
+    # 超长语音只转写前 N 秒（asr_max_seconds，0=不限制）：避免一条 5 分钟的语音
+    # 把 _RUN_LOCK 占住、后面排队的消息全部堵死。
+    _max_s = _cfg_number("asr_max_seconds", 0)
+    if _max_s and len(audio) > int(_max_s * 16000):
+        _orig = len(audio) / 16000.0
+        audio = audio[: int(_max_s * 16000)]
+        print(f"[ASR] 语音 {_orig:.1f}s 超过 asr_max_seconds={_max_s:.0f}，只转写前 {_max_s:.0f} 秒")
+
+    # Whisper 中文默认会输出繁体且不带标点。给一句简体的 initial_prompt
+    # 作为解码偏置，可稳定得到「简体 + 带标点」的结果（实测有效）。
+    _prompt = "以下是普通话的句子，请用简体中文转写，并加上标点符号。" if language == "zh" else None
     with _RUN_LOCK:
-        segments, _info = m.transcribe(wav_path, language=language, beam_size=5)
+        segments, _info = m.transcribe(audio, language=language, beam_size=5,
+                                       initial_prompt=_prompt)
         text = "".join(s.text for s in segments).strip()
     return text

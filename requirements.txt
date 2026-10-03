@@ -41,5 +41,9 @@ faster-whisper    # Whisper 的 CTranslate2 实现，CPU 友好（模型放 mode
 pysilk            # 解 QQ 语音的 silk v3 编码
 imageio-ffmpeg    # ffmpeg 兜底；项目自带 Tools/ffmpeg/ffmpeg.exe 时非必需
 
-# ---------- Gemini 分支（当前不可用，见 审查报告与自定义指南.md 1.4） ----------
+# ---------- Gemini 分支（看图 / ~Gemini 模式，见 审查报告与自定义指南.md 1.4） ----------
+# Tools/GoogleAI.py、Tools/Google_Gemini2.py 用的是新版 SDK（from google import genai），
+# 缺它时 Gemini 分支会直接回「缺少依赖：google-genai」。注意：它会把 websockets 压到 16.x。
+google-genai
+# 旧版 SDK：仓库里已无任何模块 import 它，仅为兼容保留，可删除。
 google-generativeai==0.7.2

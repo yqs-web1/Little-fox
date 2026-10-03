@@ -16,36 +16,70 @@ import re
 import base64
 import asyncio
 import traceback
+import uuid
 
 
-# ---- 友好音色名 -> edge_tts 神经语音 id（男声=Yun*，女声=Xiao*）----
-# 仅收录「当前网络端点（消费级 edge 端点）实测可正常合成」的音色。
-# 微软较新的 Latest 语音（Xiaohan/Xiaorui/Xiaomo/Xiaochen 等 及 Yunze 云泽）在该端点
-# 不返回音频（No audio was received），故不收录，避免用户选中后合成失败/回退。
-EDGE_VOICES = {
-    # 女声（经典 zh-CN 女声，已实测可用）
-    "小艺": "zh-CN-XiaoyiNeural",     # 温柔女声（默认）
-    "晓晓": "zh-CN-XiaoxiaoNeural",   # 活泼女声
-    "晓萱": "zh-CN-XiaoxuanNeural",   # 温婉女声
-    # 男声（经典 zh-CN 男声，已实测可用）
-    "云希": "zh-CN-YunxiNeural",      # 阳光男声
-    "云扬": "zh-CN-YunyangNeural",    # 专业男声（新闻感）
-    "云健": "zh-CN-YunjianNeural",    # 沉稳男声
-    "云夏": "zh-CN-YunxiaNeural",     # 清新男声
-}
-DEFAULT_EDGE_VOICE = "zh-CN-XiaoyiNeural"
+# ---- 音色表（需求③：7 → 30，含方言/粤语/台湾腔/日语/英语/韩语 + 趣味音效）----
+# 原注释说新版音色"该端点不返回音频"所以人工剔除；现在改为
+# **全部收录 + 启动自动探活**，只把真能出声的展示给用户（Tools/tts_health.py）。
+# 音色/音效/情绪规则都在 Tools/tts_voices.py。
+from Tools.tts_voices import (          # noqa: E402
+    EDGE_VOICES, GENDER_DEFAULT, DEFAULT_EDGE_VOICE, VOICES, FX_PRESETS,
+    RANDOM_NAMES, EMOTION_NAME, is_voice_name, is_fx_name, split_selection,
+    emotion_pick, voice_id_of, fx_chain, grouped_listing,
+)
 
-# 性别快捷：男生 / 女生 各取一个有代表性的默认声线
-GENDER_DEFAULT = {"男生": "zh-CN-YunxiNeural", "女生": "zh-CN-XiaoyiNeural"}
+try:
+    from Tools import tts_health
+    tts_health.start_background_probe()
+except Exception as _e:
+    print(f"[音色探活] 启动失败（不影响使用）：{_e}")
 
 
 def list_voices() -> str:
-    """返回所有可选声线的格式化清单（按性别分组），用于 ~音色 帮助。"""
-    male, female = [], []
-    for name, vid in EDGE_VOICES.items():
-        line = f"  {name}（{'男' if vid.startswith('zh-CN-Yun') else '女'}声）" + ("（默认）" if vid == DEFAULT_EDGE_VOICE else "")
-        (male if vid.startswith("zh-CN-Yun") else female).append(line)
-    return "可选女声：\n" + "\n".join(female) + "\n可选男声：\n" + "\n".join(male)
+    """按分类列出可用音色 + 音效，用于 ~音色 帮助。"""
+    try:
+        from Tools import tts_health
+        h = tts_health.healthy_ids()
+    except Exception:
+        h = None
+    return grouped_listing(h)
+
+
+def resolve_voice_and_fx(sel, text: str = ""):
+    """把用户的选择解析成 (voice_id, fx滤镜链或None)。
+
+    支持：音色名 / 性别快捷 / 完整 edge id / 音效名 / '音色+音效' /
+          '随机'（每次随机挑一个可用音色）/ '情绪'（按回复文本挑）。
+    """
+    import random as _random
+
+    name, fx_name = split_selection(sel)
+    if not name and not fx_name:
+        name = sel
+
+    # 情绪联动
+    if name == EMOTION_NAME:
+        name, fx_name = emotion_pick(text)
+
+    # 随机音色
+    if name in RANDOM_NAMES:
+        try:
+            from Tools import tts_health
+            pool = tts_health.healthy_ids()
+        except Exception:
+            pool = None
+        cands = [v["id"] for v in VOICES.values() if (pool is None or v["id"] in pool)]
+        name = _random.choice(cands) if cands else None
+
+    if not name:
+        vid = DEFAULT_EDGE_VOICE
+    else:
+        vid = voice_id_of(name) or name      # 完整 id / SAPI5 子串 直接透传
+
+    chain = fx_chain(fx_name) if fx_name else None
+    return vid, chain
+
 
 
 # ---- 解析 ~语音 指令参数 ---------------------------------------------------
@@ -140,30 +174,84 @@ def _speak_pyttsx3(text, out_path, voice=None, rate=0, volume=100):
 
 
 def _next_wav_path():
+    # 同样修复并发竞态：原实现是「检查存在 → 递增」，两线程可选中同一文件互相覆盖。
     out_dir = os.path.abspath("./responseVoice")
     os.makedirs(out_dir, exist_ok=True)
-    n = 0
-    while True:
-        cand = os.path.join(out_dir, f"tts_local_{n}.wav")
-        if not os.path.exists(cand):
-            return cand
-        n += 1
-        if n > 9999:
-            return os.path.join(out_dir, f"tts_local_{os.getpid()}.wav")
+    return os.path.join(out_dir, f"tts_local_{uuid.uuid4().hex}.wav")
 
 
 # ---- 对外：合成，返回 wav 绝对路径；失败返回 False -----------------------
+def _cfg_tts() -> dict:
+    """config.json → Others.TTS（全局语音参数，控制台可改）。
+
+    以前这几项在配置里存在但没人读，等于摆设；现在作为"没指定时"的默认值：
+      voiceColor : 默认声线（填友好名或完整 zh-CN-* id）
+      rate / volume / pitch : edge-tts 的相对值，形如 +20% / -10% / +5Hz
+    读不到就返回空 dict，行为与改动前完全一致。
+    """
+    try:
+        from Hyper import Configurator
+        tts = (Configurator.cm.get_cfg().others or {}).get("TTS")
+        return tts if isinstance(tts, dict) else {}
+    except Exception:
+        return {}
+
+
+def speakable_text(text) -> str:
+    """TTS 之前统一净化，返回**真正可朗读**的文本；空串 = 这段内容没有可读的字（纯表情/符号）。
+
+    单独抽出来的原因：调用方必须能区分两种"没读出声音"——
+      A. 没有可读内容（😊 / ** / 颜文字）—— 不是故障，应该直接发文字或提示用户；
+      B. 合成或发送失败 —— 是故障，才该报"请检查联网"。
+    以前两种情况走同一句"语音合成失败：请确认本机已联网…"，把 A 也误报成网络问题。
+    """
+    try:
+        from Tools.Sanitizer_Tools import sanitize_for_tts
+        return (sanitize_for_tts(text) or "").strip()
+    except Exception:
+        return (text or "").strip()
+
+
 async def tts_local(text, voice=None, rate=0, volume=100):
     if not text or not str(text).strip():
         return False
-    v = _resolve_voice(voice)
-    r = _rate_to_edge(rate / 200.0) if rate else "+0%"  # rate=0 用默认 +0%
+    # 纯表情/符号净化后为空：不必往下走 edge→pyttsx3 两条注定失败的链路（还会白等好几秒）
+    if not speakable_text(text):
+        print("[本地TTS] 这段内容没有可朗读的文字（纯表情/符号），跳过合成")
+        return False
+    # 需求③：解析「音色 + 音效」，支持 随机 / 情绪 / "晓晓+花栗鼠" 组合
+    _cfg = _cfg_tts()
+    if not voice and _cfg.get("voiceColor"):
+        voice = str(_cfg["voiceColor"]).strip() or None      # 全局默认声线（控制台里可改）
+    v, fx = resolve_voice_and_fx(voice, str(text))
+    r = _rate_to_edge(rate / 200.0) if rate else str(_cfg.get("rate") or "+0%")
+    _vol = str(_cfg.get("volume") or "+0%")
+    _pitch = str(_cfg.get("pitch") or "+0Hz")
 
     # 1) 优先云端神经语音（自然好听，无需 Key）
     try:
         from Tools.tools import amain
-        out = await amain(str(text), v, r, "+0%", "+0Hz")
+        out = await amain(str(text), v, r, _vol, _pitch)
+        if not out and v != DEFAULT_EDGE_VOICE:
+            # 选中的音色没产出音频时先回退默认音色重试一次。
+            # 典型场景：选了英语/日语音色却要念中文 —— 端点会返回 NoAudioReceived，
+            # 直接跌到 pyttsx3 是机械音，先试默认中文音色体验好得多。
+            print(f"[本地TTS] 音色 {v} 未产出音频，回退默认音色重试")
+            out = await amain(str(text), DEFAULT_EDGE_VOICE, r, _vol, _pitch)
         if out:
+            # 叠音效：失败自动回落原音频，绝不因为音效把语音搞没
+            if fx:
+                try:
+                    from Tools import tts_fx
+                    fxed = await asyncio.to_thread(tts_fx.apply_fx, out, fx)
+                    if fxed and fxed != out:
+                        try:
+                            os.remove(out)
+                        except Exception:
+                            pass
+                        return fxed
+                except Exception as _fe:
+                    print(f"[本地TTS] 音效应用失败，回落原音：{_fe}")
             return out
         print("[本地TTS] edge_tts 未产出音频，尝试离线兜底")
     except ImportError:
@@ -184,8 +272,12 @@ async def tts_local(text, voice=None, rate=0, volume=100):
 
 # ---- 对外：合成并发送语音（自动判定群聊/私聊，base64 内联）------------------
 async def speak_and_send(actions, Manager, Segments, event, text,
-                         voice=None, rate=0, volume=100):
-    """云端/离线合成 text 并作为 QQ 语音发送。成功返回 True，失败返回 False。"""
+                         voice=None, rate=0, volume=100, reply_to=None):
+    """云端/离线合成 text 并作为 QQ 语音发送。成功返回 True，失败返回 False。
+
+    reply_to: 私聊下要引用的消息 ID（None = 不引用）。
+              语音也是一条回复，所以私聊时同样按「引用回复」的约定带引用段。
+    """
     wav = await tts_local(text, voice=voice, rate=rate, volume=volume)
     if not wav:
         return False
@@ -199,23 +291,34 @@ async def speak_and_send(actions, Manager, Segments, event, text,
 
     # 群聊事件带 group_id，私聊事件不带 —— 据此自动选发送目标
     gid = getattr(event, "group_id", None)
+
+    def _build(payload):
+        segs = []
+        if gid is None and reply_to is not None:
+            segs.append(Segments.Reply(reply_to))
+        segs.append(Segments.Record(payload))
+        return Manager.Message(*segs)
+
+    # 语音也是一条回复 —— 发送前先把「正在思考」占位气泡收掉
+    try:
+        from Tools import bubble
+        await bubble.clear(actions, event)
+    except Exception as _e:
+        print(f"[本地TTS] 清理占位气泡失败（忽略）：{type(_e).__name__}: {_e}")
+
     try:
         if gid is not None:
-            await actions.send(group_id=gid,
-                               message=Manager.Message(Segments.Record(record_file)))
+            await actions.send(group_id=gid, message=_build(record_file))
         else:
-            await actions.send(user_id=event.user_id,
-                               message=Manager.Message(Segments.Record(record_file)))
+            await actions.send(user_id=event.user_id, message=_build(record_file))
     except Exception as _e:
         # base64 发送异常时回退为文件路径发送
         print(f"[本地TTS] base64 发送失败，尝试文件路径发送：{_e}")
         try:
             if gid is not None:
-                await actions.send(group_id=gid,
-                                   message=Manager.Message(Segments.Record(wav)))
+                await actions.send(group_id=gid, message=_build(wav))
             else:
-                await actions.send(user_id=event.user_id,
-                                   message=Manager.Message(Segments.Record(wav)))
+                await actions.send(user_id=event.user_id, message=_build(wav))
         except Exception as _e2:
             print(f"[本地TTS] 文件回退发送也失败：{_e2}")
             return False

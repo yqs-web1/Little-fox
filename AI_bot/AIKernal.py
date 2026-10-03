@@ -34,10 +34,15 @@ class AIKernal:
         self.reply_private_msg = False
         self.event = None
         self.emit_text = True  # 语音对话模式：False 时只累积文本、不向 QQ 发送文字
+        # 私聊引用回复：私聊不管回什么都引用对方那条消息
+        self.private_quote = bool(config.others.get("private_reply_quote", True))
+        # 流式回复会被拆成多条，默认只让「首条」带引用：
+        # 否则一条回复会连刷 5~8 个引用同一条消息的气泡，既吵又加重 QQ 洪水控制
+        self.quote_only_first = bool(config.others.get("quote_only_first_chunk", True))
 
     async def generate_response(self, EnableNetwork: str, cmc: ContextManager, sys_prompt: str, user_lists: dict,
                                 event: Union[Events.GroupMessageEvent, Events.PrivateMessageEvent],
-                                emit_text: bool = True):
+                                emit_text: bool = True, model_id: str | None = None):
         self.url = ""
         self.sended = False
         self.sendedID = []
@@ -51,47 +56,80 @@ class AIKernal:
 
         if isinstance(event, Events.PrivateMessageEvent):
             self.reply_private_msg = True
-        
-        match EnableNetwork:
-            case "GoogleGemini":
+
+        # ---- 需求⑤：模型注册表优先 ----
+        # 原实现用 `match EnableNetwork` 同时承担「选哪个模型」和「走哪条链路」，
+        # 传注册表 id（如 ds-chat）会一个分支都不匹配 → 什么都不回复。
+        # 现在先看是不是注册表模型：是则按 provider.type 分派，否则沿用旧的模式名分派。
+        _provider = _entry = None
+        if model_id:
+            try:
+                from Tools import model_registry
+                _provider, _entry = model_registry.resolve_model(model_id)
+                if _entry is None:
+                    print(f"[AIKernal] 模型 {model_id!r} 不在注册表里，改用模式名分派")
+            except Exception as _e:
+                print(f"[AIKernal] 注册表解析失败（回落模式名分派）：{type(_e).__name__}: {_e}")
+
+        if _entry is not None:
+            _ptype = str((_provider or {}).get("type") or "openai").lower()
+            if _ptype == "gemini":
                 new = await self.build_message_content()
-                response_stream = cmc.get_context(event.user_id, event.group_id, sys_prompt, sys_prompt, self.config).gen_content(
-                    Roles.User(*new),
-                    model_override=self.config.others.get("gemini_model", "gemini-2.0-flash-exp")
-                )
+                response_stream = cmc.get_context(
+                    event.user_id, event.group_id, sys_prompt, sys_prompt, self.config
+                ).gen_content(Roles.User(*new), model_override=_entry.get("model"))
                 await self.handle_message_stream(response_stream, False)
-
-            case "GPT-3.5" | "Net":
-                model_name = "gpt-3.5-turbo-16k" if EnableNetwork == "GPT-3.5" else "gpt-4o-mini"
+            else:
+                # OpenAI 兼容链路（中转站 / 硅基流动 / 本地 LM Studio 都走这里）
                 msg = await self.process_reply_message("")
                 msg += str(await self.replace_at_with_nickname(event.message, Manager, Segments, self.actions))
-                search = SearchOnline(
-                    sys_prompt, msg, self.user_lists, event.user_id, 
-                    model_name, self.bot_name, 
-                    self.config.others["openai_key"]
-                )
-                await self.handle_message_stream(search.Response())
-
-            case "Ds":
-                msg = await self.process_reply_message("")
-                msg += str(await self.replace_at_with_nickname(event.message, Manager, Segments, self.actions))
-                # 模型名交给 ai_backend 决定（本地走 local_model，云端走 cloud_model，官方走 deepseek-chat）
                 search = deepseek(
                     sys_prompt, msg, self.user_lists, event.user_id,
-                    "deepseek-chat", self.bot_name,
-                    ai_backend.get_api_key()
+                    str(_entry.get("id")), self.bot_name,
+                    ai_backend.get_api_key(str((_provider or {}).get("base_url") or ""))
                 )
                 await self.handle_message_stream(search.Response())
+        else:
+            match EnableNetwork:
+                case "GoogleGemini":
+                    new = await self.build_message_content()
+                    response_stream = cmc.get_context(event.user_id, event.group_id, sys_prompt, sys_prompt, self.config).gen_content(
+                        Roles.User(*new),
+                        model_override=self.config.others.get("gemini_model", "gemini-2.0-flash-exp")
+                    )
+                    await self.handle_message_stream(response_stream, False)
 
-            case "WebSearch":
-                msg = await self.process_reply_message("")
-                msg += str(await self.replace_at_with_nickname(event.message, Manager, Segments, self.actions))
-                ws = websearch(
-                    sys_prompt, msg, self.user_lists, event.user_id,
-                    "web-search", self.bot_name,
-                    config.others["deepseek_key"]
-                )
-                await self.handle_message_stream(ws.Response())
+                case "GPT-3.5" | "Net":
+                    model_name = "gpt-3.5-turbo-16k" if EnableNetwork == "GPT-3.5" else "gpt-4o-mini"
+                    msg = await self.process_reply_message("")
+                    msg += str(await self.replace_at_with_nickname(event.message, Manager, Segments, self.actions))
+                    search = SearchOnline(
+                        sys_prompt, msg, self.user_lists, event.user_id,
+                        model_name, self.bot_name,
+                        self.config.others["openai_key"]
+                    )
+                    await self.handle_message_stream(search.Response())
+
+                case "Ds":
+                    msg = await self.process_reply_message("")
+                    msg += str(await self.replace_at_with_nickname(event.message, Manager, Segments, self.actions))
+                    # 模型名交给 ai_backend 决定（本地走 local_model，云端走 cloud_model，官方走 deepseek-chat）
+                    search = deepseek(
+                        sys_prompt, msg, self.user_lists, event.user_id,
+                        "deepseek-chat", self.bot_name,
+                        ai_backend.get_api_key()
+                    )
+                    await self.handle_message_stream(search.Response())
+
+                case "WebSearch":
+                    msg = await self.process_reply_message("")
+                    msg += str(await self.replace_at_with_nickname(event.message, Manager, Segments, self.actions))
+                    ws = websearch(
+                        sys_prompt, msg, self.user_lists, event.user_id,
+                        "web-search", self.bot_name,
+                        config.others["deepseek_key"]
+                    )
+                    await self.handle_message_stream(ws.Response())
 
         self.result = self.result.rstrip()
         await self.finalize_messages()
@@ -172,13 +210,33 @@ class AIKernal:
             self.sended = True
             self.result += str(partial) + '\n'
 
+    def _should_quote_private(self) -> bool:
+        """这一条私聊回复是否要挂引用段。"""
+        if not self.private_quote:
+            return False
+        if getattr(self.event, "message_id", None) is None:
+            return False           # 拿不到原消息 ID 就没法引用，安全跳过
+        if self.quote_only_first:
+            # self.sended 由 handle_message_stream 维护：发出首条之前恒为 False
+            return not self.sended
+        return True
+
     async def send_message(self, msg: list[Segments.Base], is_reply=False) -> Manager.Ret:
         if not self.emit_text:
             return None  # 语音对话模式：不向 QQ 发送任何文字
         if self.reply_private_msg:
+            # 首条内容发出前，先把私聊的「正在思考」占位气泡收掉
+            try:
+                from Tools import bubble
+                await bubble.clear(self.actions, self.event)
+            except Exception as _e:
+                print(f"[AIKernal] 清理占位气泡失败（忽略）：{type(_e).__name__}: {_e}")
+            _segs = list(msg)
+            if self._should_quote_private():
+                _segs = [Segments.Reply(self.event.message_id)] + _segs
             return await self.actions.send(
                 user_id=self.event.user_id,
-                message=Manager.Message(*msg)
+                message=Manager.Message(*_segs)
             )
         else:
             if is_reply:

@@ -10,7 +10,7 @@ config.json -> Others 段支持的字段：
     deepseek_key    : API Key。本地模式下任意非空字符串即可（LM Studio 不校验）
     cloud_base_url  : 云端中转站地址；留空则回落到 DeepSeek 官方 https://api.deepseek.com/
     cloud_model     : 云端模型名，如 deepseek-v4-flash
-    cloud_reasoning : 云端模型是否开启思考（思维链）模式，默认 True
+    cloud_reasoning : 云端模型是否开启思考（思维链）模式；不写则按模型名自动判断（默认 True 倾向）
     ai_backend      : "local" | "cloud"，决定走本地还是云端；缺省为 "local"
     cloud_extra_headers : 云端额外请求头（部分中转站要带 sso-ak 之类的头），缺省 {}
 """
@@ -42,14 +42,41 @@ def resolve(default_mode: str = "deepseek-chat") -> tuple[str, str, dict, bool]:
 
     base_url 为空串表示用 DeepSeek 官方地址。
     use_proxy_bypass 恒为 True：本地与中转站都需要 trust_env=False 绕过环境代理。
+
+    需求⑤：若传入的是**模型注册表里的 id/别名**（Tools/model_registry.py），
+    则按注册表解析供应商与模型名；否则完全走原逻辑（向后兼容，不影响已有部署）。
     """
     o = _others()
 
+    # ---- 优先：模型注册表（~模型 切换走这条）----
+    try:
+        from Tools import model_registry
+        p, e = model_registry.resolve_model(default_mode)
+        if p is not None:
+            base = str(p.get("base_url") or "").strip()
+            model = str(e.get("model") or "").strip()
+            extra: dict = {}
+            if e.get("reasoning"):
+                extra["return_reasoning"] = True
+            if isinstance(e.get("extra_body"), dict):
+                extra.update(e["extra_body"])
+            return base, model, extra, True
+    except Exception as ex:
+        print(f"[ai_backend] 注册表解析失败，回落旧逻辑：{type(ex).__name__}: {ex}")
+
     if is_cloud_mode():
         model = str(o.get("cloud_model") or default_mode).strip()
-        # 中转站的模型名通常带思考属性，显式传思考开关，避免平台默认行为不一致
+        # 中转站的模型名通常带思考属性，显式传思考开关，避免平台默认行为不一致。
+        # cloud_reasoning 若在 config.json 里显式写了，就以它为准（控制台可改）；
+        # 没写（None）则维持原来的"按模型名猜"行为，不影响已有部署。
         extra: dict = {}
-        if "reasoning" in model or any(h in model.lower() for h in _REASONING_HINTS):
+        explicit = o.get("cloud_reasoning")
+        if explicit is None:
+            wants_reasoning = ("reasoning" in model
+                               or any(h in model.lower() for h in _REASONING_HINTS))
+        else:
+            wants_reasoning = bool(explicit)
+        if wants_reasoning:
             extra["return_reasoning"] = True
         base_url = str(o.get("cloud_base_url") or "").strip()
         return base_url, model, extra, True
@@ -65,14 +92,26 @@ def resolve(default_mode: str = "deepseek-chat") -> tuple[str, str, dict, bool]:
     return "", model, extra, True
 
 
-def get_api_key() -> str:
-    """取 API Key。优先级：环境变量 > config.json > 占位值。
+def get_api_key(base_url: str | None = None) -> str:
+    """取 API Key。优先级：provider 专属环境变量 > 通用环境变量 > config.json > 占位值。
 
     推荐把 Key 放进环境变量，config.json 的 deepseek_key 留空：
     配置文件很容易被随手打包/上传，而环境变量不在项目目录里。
-    支持两个变量名：JIANER_API_KEY（本项目专用，优先）与 DEEPSEEK_API_KEY（通用）。
-    本地模式也要求非空（LM Studio 会忽略该值，但 openai SDK 不允许空 key）。
+    支持两个通用变量名：JIANER_API_KEY（本项目专用，优先）与 DEEPSEEK_API_KEY。
+
+    需求⑤：传了 base_url 时，优先用**该 provider 在 models.providers 里配置的 key_env**，
+    这样多个供应商可以各用各的 Key；只有一个通用 Key 时行为与原来完全一致。
     """
+    if base_url:
+        try:
+            from Tools import model_registry
+            for _pk, _p in model_registry.providers().items():
+                if str(_p.get("base_url") or "").strip() == str(base_url).strip():
+                    _env = str(_p.get("key_env") or "").strip()
+                    if _env and (os.environ.get(_env) or "").strip():
+                        return os.environ[_env].strip()
+        except Exception:
+            pass
     for _env_name in ("JIANER_API_KEY", "DEEPSEEK_API_KEY"):
         _v = (os.environ.get(_env_name) or "").strip()
         if _v:
