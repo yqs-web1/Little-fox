@@ -43,11 +43,15 @@ def user_quoted(event) -> bool:
 
 
 def _segments(Segments, message):
-    """把 str / 单个 Segment / Segment 列表 统一成列表。"""
+    """把 str / 单个 Segment / Segment 列表 统一成列表。
+
+    纯空白字符串按"没内容"处理（原来只判 message 是否为空字符串，
+    "   " 会被当成有内容发出去 —— 又是一条只有空白的消息）。
+    """
     if message is None:
         return []
     if isinstance(message, str):
-        return [Segments.Text(message)] if message else []
+        return [Segments.Text(message)] if message.strip() else []
     if isinstance(message, (list, tuple)):
         return [s for s in message if s is not None]
     return [message]
@@ -76,9 +80,13 @@ async def reply_send(actions, Manager, Segments, event, message, quote=None):
     gid = getattr(event, "group_id", None)
     if quote is None:
         quote = _flag("private_reply_quote", True) if gid is None else False
-    # 私聊只在"用户自己引用了某条消息"时才回引用（默认行为收紧，见 user_quoted 的说明）
-    if quote and gid is None and not user_quoted(event):
-        quote = False
+    if quote and gid is None:
+        # 需求：私聊**只有纯文字回复**才带引用 ——
+        #   * 用户必须自己先引用了某条消息（否则不回引用，见 user_quoted 的说明）；
+        #   * 且这条回复必须全是文字段：语音/图片/文件/转发等一律不挂引用
+        #     （实测"语音 + 引用"在 QQ 上引用块显示不正常）。
+        if not user_quoted(event) or not all(isinstance(_s, Segments.Text) for _s in segs):
+            quote = False
 
     try:
         if gid is not None:
