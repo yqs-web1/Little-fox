@@ -198,3 +198,9 @@ like_data.json
 secrets.env
 *.key
 .env
+
+# --- 手工备份文件（历史版本已在 git 提交历史里，不再散落工作区）---
+*.bak
+*.bak_*
+*.save
+config.json.save
