@@ -1,0 +1,45 @@
+# 运行环境：Python 3.13（项目 venv 实测 3.13.14）
+# 安装：venv\Scripts\python.exe -m pip install -r requirements.txt
+#
+# 说明：原文件里的 asyncio / datetime 是 Python 标准库，不应当作 pip 包安装，已移除。
+
+# ---------- 框架与核心 ----------
+hyper-bot==0.78.2
+openai>=1.35.12
+requests
+aiohttp
+httpx
+pillow
+emoji
+psutil
+# GPU 占用查询（Tools/tools.py 里 `import pynvml`）。
+# 已装的 pynvml 13.x 也能用，但会打印弃用警告，推荐改用 nvidia-ml-py（提供同名模块）。
+nvidia-ml-py
+websocket-client
+
+# ---------- 向导 app.py（Flask 安装向导） ----------
+flask
+flask-cors
+flask-sock
+flask-socketio
+playwright
+
+# ---------- 插件 / 向导用到的第三方服务 ----------
+pyGithub
+paramiko>=3.5.1
+pymysql
+cryptography
+pycryptodome
+
+# ---------- 语音合成 TTS ----------
+edge_tts          # 主引擎：微软神经语音，云端、免 Key、音质好
+pyttsx3           # 离线兜底引擎（无网时启用）
+pywin32           # pyttsx3 在 Windows 上依赖它
+
+# ---------- 语音识别 ASR ----------
+faster-whisper    # Whisper 的 CTranslate2 实现，CPU 友好（模型放 models/faster-whisper-<size>/）
+pysilk            # 解 QQ 语音的 silk v3 编码
+imageio-ffmpeg    # ffmpeg 兜底；项目自带 Tools/ffmpeg/ffmpeg.exe 时非必需
+
+# ---------- Gemini 分支（当前不可用，见 审查报告与自定义指南.md 1.4） ----------
+google-generativeai==0.7.2
