@@ -115,6 +115,16 @@ ROOT_User: list = config.others["ROOT_User"]
 Super_User: list = []
 Manage_User: list = []
 
+# 修复：config.json 的 owner 字段此前只被赋给 bot_owner、从未用于权限判断，
+# 于是"把 QQ 号填进 owner、ROOT_User 留空"会让人**一点管理权限都没有**
+# （ADMINS = Super_User + ROOT_User + Manage_User 三个都是空）。
+# 这里把 owner 并入 ROOT_User，并统一成字符串，保证权限判断与 notify_root 都能用。
+_owner_id = str(config.owner[0]).strip() if config.owner else ""
+if _owner_id and _owner_id not in ("0", "") and _owner_id not in [str(x) for x in ROOT_User]:
+    ROOT_User.append(_owner_id)
+    print(f"sys: 已把 config.json 的 owner({_owner_id}) 并入 ROOT_User")
+ROOT_User = [str(x) for x in ROOT_User if str(x).strip()]
+
 logger = Logger.Logger()
 logger.set_level(config.log_level)
 version_name = "3.1 - 𝑵𝒆𝒙𝒕 𝑹𝒆𝒍𝒆𝒂𝒔𝒆"
