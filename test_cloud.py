@@ -8,7 +8,8 @@
     venv\\Scripts\\python.exe test_cloud.py <你的KEY>
     venv\\Scripts\\python.exe test_cloud.py <你的KEY> --only <端点序号>
 
-注意：本脚本会把 key 写进 config.json（供机器人使用），跑完请自行确认 config.json 权限。
+注意：本脚本只探测连通性，不会写任何文件。Key 通过命令行参数传入，
+机器人本身从环境变量 JIANER_API_KEY（或 config.json 的 deepseek_key）读取。
 """
 from __future__ import annotations
 
