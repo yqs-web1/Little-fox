@@ -227,3 +227,9 @@ NapCat.Shell/*.db
 NapCat.Shell/*.db-shm
 NapCat.Shell/*.db-wal
 console.json
+
+# ===== 大体积字体（上游遗留，代码零引用；本地保留，请从上游 assets 取用）=====
+assets/e.ttf
+assets/e.ttf11
+assets/n.ttf
+assets/t.ttf
