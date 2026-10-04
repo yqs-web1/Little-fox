@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>小狐狸控制台</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="fox">🦊</span>
+    <div class="brand-text">
+      <h1>小狐狸控制台<small id="verTag"></small></h1>
+      <p id="botDir">正在连接…</p>
+    </div>
+  </div>
+  <div class="topright">
+    <span id="dirtyBadge" class="pill warn hidden">有未保存修改</span>
+    <span id="botPill" class="pill">检测中…</span>
+    <button id="btnSaveAll" class="btn primary">保存全部</button>
+    <button id="btnReload" class="btn ghost">重新读取</button>
+  </div>
+</header>
+
+<nav class="tabs" id="tabs"></nav>
+
+<main id="panels">
+
+  <!-- ============ 概览 ============ -->
+  <section class="panel" data-panel="overview">
+    <div class="grid cards" id="ovCards"></div>
+
+    <div class="card">
+      <h2>机器人控制</h2>
+      <p class="hint">启动/停止只针对 <code>main.py</code> 这个机器人进程；NapCat（QQ 协议端）请用一键启动脚本，或单独管理。
+        停止操作只结束「命令行里确实带本项目 main.py」的进程，不会凭锁文件猜。</p>
+      <div class="row">
+        <button class="btn primary" data-act="bot-start">启动机器人</button>
+        <button class="btn" data-act="bot-all">一键启动（含 NapCat）</button>
+        <button class="btn" data-act="bot-restart">重启机器人</button>
+        <button class="btn danger" data-act="bot-stop">停止机器人</button>
+      </div>
+      <div id="ovLockWarn"></div>
+      <pre class="out" id="ovOpOut"></pre>
+    </div>
+
+    <div class="card">
+      <h2>保存行为</h2>
+      <div id="f-console-settings"></div>
+      <pre class="out" id="ovSaveOut"></pre>
+    </div>
+
+    <div class="card">
+      <h2>常驻与开机自启</h2>
+      <div id="f-autostart"></div>
+    </div>
+
+    <div class="card" id="ovHealthCard">
+      <h2>配置文件体检</h2>
+      <div id="ovHealth"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>字段审计（代码 ↔ 界面 ↔ 配置）</h2>
+        <button class="btn small ghost" id="btnAuditRefresh">重新扫描</button>
+      </div>
+      <p class="hint">扫描机器人源码里真正读取的配置键，和界面字段对照。
+        <b>机器人新加的功能字段会在这里第一时间冒出来</b>，不用等你发现"界面上改不了"。</p>
+      <div id="ovAudit">加载中…</div>
+    </div>
+
+    <div class="card">
+      <h2>目录与文件</h2>
+      <div id="ovFiles"></div>
+    </div>
+  </section>
+
+  <!-- ============ AI 模型 ============ -->
+  <section class="panel" data-panel="ai">
+    <div class="card">
+      <h2>使用的 AI 后端</h2>
+      <div id="f-ai-backend"></div>
+    </div>
+    <div class="card">
+      <h2>云端（DeepSeek / 中转站）</h2>
+      <div id="f-ai-cloud"></div>
+    </div>
+    <div class="card">
+      <h2>本地（LM Studio 等 OpenAI 兼容服务）</h2>
+      <div id="f-ai-local"></div>
+    </div>
+    <div class="card">
+      <h2>API Key</h2>
+      <p class="hint">Key 优先读环境变量，其次才是 config.json。这里显示的是「实际生效来源」。</p>
+      <div id="f-ai-keys"></div>
+      <div class="row">
+        <button class="btn" data-test="cloud">测试云端连通</button>
+        <button class="btn" data-test="local">测试本地连通</button>
+        <button class="btn" data-test="gemini">测试 Gemini</button>
+        <button class="btn" data-test="openai">测试 OpenAI</button>
+      </div>
+      <pre class="out" id="aiTestOut"></pre>
+    </div>
+    <div class="card">
+      <h2>对话模式与语音识别</h2>
+      <div id="f-ai-mode"></div>
+    </div>
+    <div class="card actions-card">
+      <button class="btn primary" data-save>保存 AI 设置</button>
+      <button class="btn" data-save-restart>保存并重启机器人</button>
+      <span class="hint">保存到 config.json。机器人正在运行时，除 ~后端 这类即时切换的指令外，都需要重启才生效。</span>
+    </div>
+  </section>
+
+  <!-- ============ 模型注册表 ============ -->
+  <section class="panel" data-panel="models">
+    <div class="card">
+      <h2>模型注册表（多模型切换）</h2>
+      <div id="modelsBanner"></div>
+      <p class="hint">这一块对应 <code>config.json → models</code>：供应商（providers）与模型（registry）分离，
+        一个供应商可以挂多个模型；<code>default</code> 是全局默认，<code>fallback_chain</code> 是自动降级顺序。
+        字段含义见《五项功能设计方案》§5.2。改完用下面的「保存」写入 config.json。</p>
+      <div class="row">
+        <button class="btn" id="btnModelsSeed">从当前配置生成初始注册表</button>
+        <button class="btn ghost" id="btnModelsAddProvider">＋ 供应商</button>
+        <button class="btn ghost" id="btnModelsAddModel">＋ 模型</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>供应商 providers</h2>
+      <div id="modelsProviders" class="scroll-box" style="max-height:none"></div>
+    </div>
+    <div class="card">
+      <h2>模型 registry</h2>
+      <div id="modelsRegistry" class="scroll-box" style="max-height:none"></div>
+    </div>
+    <div class="card">
+      <h2>默认与降级</h2>
+      <div id="modelsDefaults"></div>
+    </div>
+    <div class="card actions-card">
+      <button class="btn primary" data-save>保存模型注册表</button>
+      <button class="btn" data-save-restart>保存并重启机器人</button>
+      <button class="btn ghost danger" id="btnModelsClear">删除整个 models 段</button>
+    </div>
+  </section>
+
+  <!-- ============ 人格与话术 ============ -->
+  <section class="panel" data-panel="persona">
+    <div class="card">
+      <h2>身份</h2>
+      <div id="f-persona-id"></div>
+    </div>
+    <div class="card">
+      <h2>消息与气泡行为</h2>
+      <p class="hint">这几项是机器人代码<b>确实会读取</b>的开关（私聊引用、正在输入气泡、思考气泡）。</p>
+      <div id="f-persona-bubbles"></div>
+    </div>
+    <div class="card">
+      <h2>其它行为（字段审计补出来的）</h2>
+      <p class="hint">这两项是机器人代码在用、界面之前没有的配置 —— 由「概览 → 字段审计」自动发现后补上。</p>
+      <div id="f-persona-misc"></div>
+    </div>
+    <div class="card">
+      <h2>夸奖语（被夸时随机挑一条）</h2>
+      <div id="f-persona-compliment"></div>
+    </div>
+    <div class="card">
+      <h2>戳一戳拒绝语（被戳时随机挑一条）</h2>
+      <div id="f-persona-poke"></div>
+    </div>
+    <div class="card">
+      <h2>变量说明</h2>
+      <p class="hint">预设正文里可用的占位符：<code>{self.bot_name}</code> 机器人中文名、<code>{self.bot_name_en}</code> 英文名、
+        <code>{self.event_user}</code> 当前用户昵称、<code>{self.event_user_id}</code> 当前用户 QQ 号。
+        这些变量在每次对话时由机器人实时替换。</p>
+    </div>
+    <div class="card actions-card">
+      <button class="btn primary" data-save>保存人格与话术</button>
+      <button class="btn" data-save-restart>保存并重启机器人</button>
+    </div>
+  </section>
+
+  <!-- ============ 语音 ============ -->
+  <section class="panel" data-panel="voice">
+    <div class="card">
+      <h2>全局语音参数</h2>
+      <p class="hint">这里是 <code>config.json → Others.TTS</code>，作为<b>没指定声线时的默认值</b>
+        （已接到 <code>Tools/tts_local.py</code>）。单个用户/群在「用户与权限」里选的声线优先于它。</p>
+      <div id="f-voice-main"></div>
+    </div>
+    <div class="card">
+      <h2>试听</h2>
+      <div id="f-voice-preview"></div>
+      <div class="row">
+        <button class="btn" id="btnPreview">用当前参数试听</button>
+        <button class="btn ghost" id="btnVoicesRefresh">刷新在线声线清单</button>
+      </div>
+      <div id="voicePreviewBox"></div>
+    </div>
+    <div class="card">
+      <h2>全部可用声线（edge-tts 在线清单）</h2>
+      <div id="voiceListBox" class="scroll-box">加载中…</div>
+    </div>
+    <div class="card actions-card">
+      <button class="btn primary" data-save>保存语音设置</button>
+      <button class="btn" data-save-restart>保存并重启机器人</button>
+    </div>
+  </section>
+
+  <!-- ============ 预设与角色 ============ -->
+  <section class="panel" data-panel="presets">
+    <div class="split">
+      <div class="card">
+        <div class="card-head">
+          <h2>预设列表</h2>
+          <button class="btn small" id="btnNewPreset">新建预设</button>
+        </div>
+        <div id="presetList" class="list"></div>
+        <p class="hint">一个 QQ 号只能属于一个预设；没登记的用户走 <code>Normal</code> 兜底预设。</p>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h2 id="presetEditorTitle">预设内容</h2>
+          <span id="presetFileTag" class="tag"></span>
+        </div>
+        <div id="f-preset-form"></div>
+        <label class="field">
+          <span class="label">正文（系统提示词）</span>
+          <textarea id="presetContent" class="mono" rows="18" spellcheck="false"></textarea>
+          <span class="hint" id="presetContentHint">支持 {self.bot_name} / {self.event_user} 这类占位符</span>
+        </label>
+        <div class="row">
+          <button class="btn primary" id="btnPresetSave">保存这个预设</button>
+          <button class="btn danger" id="btnPresetDelete">删除</button>
+          <span class="hint" id="presetDirty"></span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 用户与权限 ============ -->
+  <section class="panel" data-panel="users">
+    <div class="card">
+      <h2>名单</h2>
+      <p class="hint">每行一个 QQ 号，或在一行里用空格/逗号分隔。留空表示不限制。</p>
+      <div id="f-users-lists"></div>
+    </div>
+    <div class="card">
+      <h2>每会话语音开关与声线</h2>
+      <p class="hint"><code>u123</code> 表示私聊用户 123，<code>g456</code> 表示群 456。留空表示不覆盖，走全局默认声线。</p>
+      <div id="voicePrefsTable"></div>
+      <div class="row">
+        <input id="newPrefKey" class="input" placeholder="u123 或 g456" style="max-width:180px">
+        <button class="btn small" id="btnAddPref">添加一行</button>
+        <button class="btn ghost small" id="btnCleanPref">清掉离线会话</button>
+      </div>
+    </div>
+    <div class="card actions-card">
+      <button class="btn primary" data-save-users>保存用户与权限</button>
+      <button class="btn primary" data-save-prefs>保存语音开关</button>
+    </div>
+  </section>
+
+  <!-- ============ 连接与运维 ============ -->
+  <section class="panel" data-panel="ops">
+    <div class="card">
+      <h2>框架与连接</h2>
+      <div id="f-conn"></div>
+    </div>
+    <div class="card">
+      <h2>运行状态</h2>
+      <div id="opsStatus"></div>
+      <div class="row">
+        <button class="btn" data-act="bot-start">启动机器人</button>
+        <button class="btn" data-act="bot-restart">重启机器人</button>
+        <button class="btn danger" data-act="bot-stop">停止机器人</button>
+        <button class="btn ghost" data-act="bot-clear-lock">清理残留锁文件</button>
+        <button class="btn ghost" id="btnStatusRefresh">刷新状态</button>
+      </div>
+      <pre class="out" id="opsOut"></pre>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <h2>实时日志</h2>
+        <div class="row">
+          <select id="logSelect" class="input"></select>
+          <label class="inline"><input type="checkbox" id="logAuto" checked> 自动刷新</label>
+          <button class="btn small" id="btnLogRefresh">刷新</button>
+        </div>
+      </div>
+      <pre class="log" id="logBox">（启动机器人后，它的输出会写进这里的 logs 目录）</pre>
+    </div>
+    <div class="card actions-card">
+      <button class="btn primary" data-save>保存连接设置</button>
+      <button class="btn" data-save-restart>保存并重启机器人</button>
+      <span class="hint">Host/Port 指 NapCat 的 OneBot 服务地址；改完需要重启机器人。</span>
+    </div>
+  </section>
+
+  <!-- ============ 备份 ============ -->
+  <section class="panel" data-panel="backup">
+    <div class="card">
+      <h2>自动备份</h2>
+      <p class="hint">每次保存前，控制台都会把被覆盖的文件备份到 <code>fox-console/backups/</code>，
+        每种文件最多保留 40 份。还原前会再备份一次当前文件。</p>
+      <div class="row">
+        <button class="btn ghost small" id="btnBackupRefresh">刷新列表</button>
+      </div>
+      <div id="backupList" class="list"></div>
+    </div>
+  </section>
+
+</main>
+
+<div id="toasts"></div>
+<div id="loading" class="loading hidden"><div class="spinner"></div><span>处理中…</span></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

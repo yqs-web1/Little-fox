@@ -1,0 +1,24 @@
+# NapCat 本体（第三方发行包，请从官方渠道获取）
+node_modules/
+cache/
+logs/
+worker/
+native/
+static/
+plugins/
+napcat.mjs
+napcat.mjs.bak*
+
+# 本地配置（含 QQ 号与 token）
+config/
+*.json.bak
+
+# 数据库与会话文件
+*.db
+*.db-shm
+*.db-wal
+
+# 系统
+Thumbs.db
+desktop.ini
+.DS_Store

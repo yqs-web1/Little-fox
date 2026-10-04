@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# 虚拟环境
+venv/
+env/
+ENV/
+.venv/
+
+# 依赖
+node_modules/
+.yarn/
+.pnp.*
+
+# 个人配置与密钥（绝不提交）
+console.json
+.env
+.env.*
+*.key
+*.pem
+secrets*.json
+voices_cache.json
+
+# 运行时产物
+logs/
+*.log
+preview/
+screenshots/
+backups/
+*.mp3
+*.wav
+*.db
+*.db-shm
+*.db-wal
+jianer.lock
+
+# 本地路径
+bot_dir  # 运行时写入 console.json，已在上方忽略
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

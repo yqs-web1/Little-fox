@@ -1,0 +1,6 @@
+{
+  "_说明": "fox-console 自身配置模板。复制为 console.json 后使用。token 留空时会在首次启动时自动生成。",
+  "token": "",
+  "port": 5011,
+  "bot_dir": "C:\\path\\to\\Jianer_Next_QQ_Bot"
+}
