@@ -1,0 +1,78 @@
+{
+  "_说明": "这是 config.json 的模板。复制为 config.json 后按需修改。所有 API Key 请留空，改用环境变量（见 README）。",
+  "owner": [0],
+  "black_list": [],
+  "silents": [],
+  "Connection": {
+    "mode": "FWS",
+    "host": "127.0.0.1",
+    "port": 5004,
+    "listener_host": "127.0.0.1",
+    "listener_port": 5003,
+    "retries": 5,
+    "satori_token": ""
+  },
+  "Log_level": "INFO",
+  "protocol": "OneBot",
+  "Others": {
+    "private_reply_quote": true,
+    "private_typing_bubble": true,
+    "quote_only_first_chunk": true,
+    "thinking_bubble": true,
+    "thinking_bubble_delay": 3,
+    "thinking_bubble_text": "正在思考中……",
+    "thinking_bubble_max": 60,
+    "models": {
+      "providers": {
+        "relay": {
+          "type": "openai",
+          "base_url": "https://YOUR-RELAY-ENDPOINT/v1",
+          "key_env": "JIANER_API_KEY"
+        },
+        "local": {
+          "type": "openai",
+          "base_url": "http://localhost:1234/v1",
+          "key_env": ""
+        },
+        "gemini": {
+          "type": "gemini",
+          "base_url": "https://generativelanguage.googleapis.com/",
+          "key_env": "GEMINI_API_KEY"
+        }
+      },
+      "registry": [],
+      "default": "",
+      "fallback_chain": []
+    },
+    "gemini_key": "",
+    "gemini_base_url": "https://generativelanguage.googleapis.com/",
+    "gemini_model": "gemini-2.0-flash-exp",
+    "openai_key": "",
+    "deepseek_key": "",
+    "ai_backend": "local",
+    "cloud_base_url": "",
+    "cloud_model": "",
+    "cloud_extra_headers": {},
+    "default_mode": "Ds",
+    "bot_name": "MyBot",
+    "bot_name_en": "MyBot",
+    "ROOT_User": [],
+    "Auto_approval": [],
+    "local_base_url": "http://localhost:1234/v1",
+    "local_model": "google/gemma-3-4b",
+    "asr_enabled": false,
+    "asr_model": "base",
+    "asr_language": "zh",
+    "reminder": ".",
+    "slogan": "Your slogan here",
+    "TTS": {
+      "voiceColor": "zh-CN-XiaoyiNeural",
+      "rate": "+0%",
+      "volume": "+0%",
+      "pitch": "+0Hz"
+    },
+    "compliment": [],
+    "poke_rejection_phrases": []
+  },
+  "uin": 0
+}

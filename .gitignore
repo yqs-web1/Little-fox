@@ -209,3 +209,21 @@ instances.json
 *.bak_*
 *.save
 config.json.save
+
+# ===== 追加：上传前加固（个人配置 / 密钥 / NapCat 本地状态）=====
+.env
+.env.*
+*.key
+*.pem
+secrets*.json
+voices_cache.json
+preview/
+screenshots/
+backups/
+NapCat.Shell/config/
+NapCat.Shell/cache/
+NapCat.Shell/logs/
+NapCat.Shell/*.db
+NapCat.Shell/*.db-shm
+NapCat.Shell/*.db-wal
+console.json
